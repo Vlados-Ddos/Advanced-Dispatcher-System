@@ -2,9 +2,7 @@
 
 ### Description
 
-Advanced Dispatcher System is a web dispatch console for Derail Valley. It reads the current railway state and presents topology, rolling stock, signals, turnouts, blocks, routes, orders and players on one map with an object inspector.
-
-It is intended for route planning, conflict and reservation checks, traffic monitoring and supported infrastructure commands from a browser. It does not create a second railway topology or replace the game’s native signalling systems.
+Advanced Dispatcher System is a web dispatch console for Derail Valley. It reads the current railway state and presents topology, rolling stock, signals, turnouts, blocks, routes, orders and players on one map with an object inspector. It is intended for route planning, conflict and reservation checks, traffic monitoring and supported infrastructure commands from a browser. It does not create a second railway topology or replace the game’s native signalling systems.
 
 ### Installation instructions
 
@@ -54,26 +52,23 @@ The browser role controls dispatcher permissions. Multiplayer authority remains 
 - Native railway topology and track geometry in game coordinates.
 - Map layers for tracks, turnouts, main and shunting signals, blocks, reservations, routes, trains, players, stations, industries, passenger stops, turntables, speed information, signs and technical labels.
 - Real signal aspects, lamps, direction, blinking state and shunting classification when DV Signals is available.
-- Track Set To and Departure Allowed indicators from their real owner and state.
 - Turnout branches and route highlights based on actual topology links.
 - Track blocks with occupancy, reservation, direction, trains and linked signals when supplied by the game.
 - Locomotives, wagons, coupled groups, tenders, traction sections and consist cargo.
 - Orders with status, owner, cargo, cars, trains, destinations, tasks, payment, licences and history.
-- Players and positions when supplied by the game or Multiplayer integration.
+- Players and positions in Multiplayer.
 - Language-independent search, sorting, status filters, active-only filters and virtualized long lists.
 - Route preview from a track or selected train to a destination track.
 - Ordered intermediate route points selected on the map or in the track inspector.
 - Route sequence, blocks, signals, turnouts, turntables, warnings and remaining distance.
-- Exact-ID selection of the confirmed route after planning; the planning bar closes and Routes opens automatically.
 - Advisory planning that can align turnouts while describing an occupied approach without claiming a reservation.
 - Normal reservations using the game and DV Signals state.
-- Protected reservations that lock conflicting route turnouts through native game and supported Multiplayer host protection.
+- Protected reservations that lock conflicting route turnouts through native game.
 - Safety checks for rolling stock occupying or approaching a turnout.
 - Cleanup of partially prepared routes when a later command or reservation check fails.
 - Supported remote turntable alignment; non-opposite exits require a separate train manoeuvre.
 - Event log, route warning history, reconnect handling and server health information.
 - Authenticated viewer, dispatcher and local host administrator roles.
-- Optional DV Signals, Passenger Jobs, Double Track and Multiplayer adapters.
 
 ### Map and display settings
 
@@ -132,9 +127,7 @@ The interface follows the host game language and provides Russian and English st
 
 ### Описание
 
-Advanced Dispatcher System — web-диспетчерская для Derail Valley. Она получает текущее состояние железнодорожной сети и показывает топологию, подвижной состав, сигналы, стрелки, блоки, маршруты, заказы и игроков на общей карте и в инспекторе.
-
-Мод предназначен для планирования маршрутов, проверки конфликтов и резерваций, наблюдения за движением и поддерживаемых команд инфраструктуре из браузера. Он не создаёт вторую топологию и не заменяет штатную сигнализацию игры.
+Advanced Dispatcher System — web-диспетчерская для Derail Valley. Она получает текущее состояние железнодорожной сети и показывает топологию, подвижной состав, сигналы, стрелки, блоки, маршруты, заказы и игроков на общей карте и в инспекторе. Мод предназначен для планирования маршрутов, проверки конфликтов и резерваций, наблюдения за движением и поддерживаемых команд инфраструктуре из браузера. Он не создаёт вторую топологию и не заменяет штатную сигнализацию игры.
 
 ### Установка
 
@@ -184,26 +177,23 @@ Windows Firewall и перенаправление порта на роутер�
 - Реальная топология и геометрия путей в игровых координатах.
 - Слои путей, стрелок, поездных и маневровых сигналов, блоков, резервов, маршрутов, поездов, игроков, станций, промышленных объектов, пассажирских остановок, кругов, скоростной информации, знаков и технических подписей.
 - Реальные показания, лампы, направление, мигание и классификация маневровых сигналов при наличии DV Signals.
-- Индикаторы Track Set To и Departure Allowed по их владельцу и состоянию.
 - Ветки стрелок и подсветка маршрутов по реальным топологическим связям.
 - Путевые блоки с занятостью, резервом, направлением, поездами и сигналами, если игра передаёт эти данные.
 - Локомотивы, вагоны, сцепленные группы, тендеры, тяговые секции и груз состава.
 - Заказы со статусом, владельцем, грузом, вагонами, поездами, назначениями, задачами, оплатой, лицензиями и историей.
-- Игроки и их положение, если данные передаёт игра или Multiplayer.
+- Игроки и их положение в Multiplayer.
 - Поиск независимо от языка, сортировка, фильтры состояния, фильтр активных объектов и виртуализированные длинные списки.
 - Предпросмотр маршрута от пути или выбранного поезда до пути назначения.
 - Упорядоченные промежуточные точки с выбором на карте или в инспекторе пути.
 - Последовательность маршрута, блоки, сигналы, стрелки, круги, предупреждения и оставшееся расстояние.
-- После подтверждённого планирования нижняя панель закрывается, открываются «Маршруты» и выбирается точный маршрут.
 - Advisory-планирование, которое может выровнять стрелки занятого подхода без создания резервации.
 - Обычные резервации с использованием состояния игры и DV Signals.
-- Защищённые резервации с блокировкой конфликтующих ветвей через игру и совместимый Multiplayer host.
+- Защищённые резервации с блокировкой конфликтующих ветвей через игру.
 - Проверка техники, стоящей на стрелке или приближающейся к ней.
 - Очистка частично подготовленного маршрута при отказе следующей команды или проверки.
 - Поддерживаемое удалённое выравнивание поворотных кругов; для непротивоположных выходов нужен отдельный манёвр.
 - Журнал событий, история предупреждений маршрутов, переподключение и состояние сервера.
 - Роли браузера viewer, dispatcher и локального администратора хоста.
-- Необязательные адаптеры DV Signals, Passenger Jobs, Double Track и Multiplayer.
 
 ### Карта и настройки отображения
 
