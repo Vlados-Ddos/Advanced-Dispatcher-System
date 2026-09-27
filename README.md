@@ -9,10 +9,8 @@ It is intended for route planning, conflict and reservation checks, traffic moni
 ### Installation instructions
 
 1. Install [**Unity Mod Manager**](https://www.nexusmods.com/site/mods/21).
-2. Copy the `AdvancedDispatcherSystem` folder from the release ZIP into the game’s `Mods` folder.
-3. Enable **Advanced Dispatcher System** in UMM.
-4. Open the mod settings and click **Open dispatcher**.
-5. The local owner signs in automatically. The default address is `http://127.0.0.1:7246/` unless the port or HTTPS setting was changed.
+2. Open the mod settings and click **Open dispatcher**.
+3. The local owner signs in automatically. The default address is `http://127.0.0.1:7246/` unless the port or HTTPS setting was changed.
 
 Close the game and dispatcher before replacing the mod. Never publish or share `Host/data`; it contains local accounts and server credentials.
 
@@ -123,12 +121,10 @@ The interface follows the host game language and provides Russian and English st
 
 ### Compatibility
 
-- **Derail Valley:** current project references Build 99 / Unity 2019.4.40f1.
-- **Unity Mod Manager:** 0.32.4 or a compatible version.
-- **Double Track:** optional, current integration references 2.1.1.
-- **DV Signals:** optional, current integration references 1.1.3.
-- **Passenger Jobs:** optional, adapter support for 5.3.0.
-- **Multiplayer:** optional, adapter targets Multiplayer 0.1.16.0 / API 1.1.0.0 and a compatible host.
+- **Double Track:** Fully compatible.
+- **DV Signals:** Fully compatible.
+- **Passenger Jobs:** Fully compatible.
+- **Multiplayer:** Fully compatible.
 
 ---
 
@@ -143,10 +139,8 @@ Advanced Dispatcher System — web-диспетчерская для Derail Vall
 ### Установка
 
 1. Установите [**Unity Mod Manager**](https://www.nexusmods.com/site/mods/21).
-2. Скопируйте папку `AdvancedDispatcherSystem` из ZIP-релиза в папку `Mods` игры.
-3. Включите **Advanced Dispatcher System** в UMM.
-4. Откройте настройки мода и нажмите **Открыть диспетчерскую**.
-5. Локальный владелец входит автоматически. Адрес по умолчанию — `http://127.0.0.1:7246/`, если порт или HTTPS не изменены.
+2. Откройте настройки мода и нажмите **Открыть диспетчерскую**.
+3. Локальный владелец входит автоматически. Адрес по умолчанию — `http://127.0.0.1:7246/`, если порт или HTTPS не изменены.
 
 Перед заменой мода закройте игру и диспетчерскую. Не публикуйте и не передавайте `Host/data`: там находятся локальные учётные записи и данные сервера.
 
@@ -257,9 +251,7 @@ Advisory-план может описывать занятый подход и �
 
 ### Совместимость
 
-- **Derail Valley:** текущие ссылки проекта Build 99 / Unity 2019.4.40f1.
-- **Unity Mod Manager:** 0.32.4 или совместимая версия.
-- **Double Track:** необязателен, текущая интеграция использует ссылки 2.1.1.
-- **DV Signals:** необязателен, текущая интеграция использует ссылки 1.1.3.
-- **Passenger Jobs:** необязателен, поддерживается адаптер 5.3.0.
-- **Multiplayer:** необязателен, адаптер рассчитан на Multiplayer 0.1.16.0 / API 1.1.0.0 и совместимый host.
+- **Double Track:** Полная совместимость.
+- **DV Signals:** Полная совместимость.
+- **Passenger Jobs:** Полная совместимость.
+- **Multiplayer:** Полная совместимость.
