@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net48</TargetFramework><AssemblyName>AdvancedDispatcherSystem.Multiplayer</AssemblyName></PropertyGroup>
+  <PropertyGroup>
+    <MultiplayerReferenceDirectory Condition="'$(MultiplayerReferenceDirectory)' == '' and Exists('$(GameRoot)/Mods/Multiplayer/Multiplayer.dll')">$(GameRoot)/Mods/Multiplayer</MultiplayerReferenceDirectory>
+    <MultiplayerReferenceDirectory Condition="'$(MultiplayerReferenceDirectory)' == ''">$(MSBuildThisFileDirectory)../../tools/references</MultiplayerReferenceDirectory>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../AdvancedDispatcherSystem.Game/AdvancedDispatcherSystem.Game.csproj" />
+    <Reference Include="../../tools/references/MultiplayerAPI.dll"><Private>false</Private></Reference>
+    <Reference Include="$(MultiplayerReferenceDirectory)/Multiplayer.dll"><Private>false</Private></Reference>
+    <Reference Include="$(MultiplayerReferenceDirectory)/LiteNetLib.dll"><Private>false</Private></Reference>
+    <Reference Include="$(GameRoot)/DerailValley_Data/Managed/DV.RailTrack.dll"><Private>false</Private></Reference>
+    <Reference Include="$(GameRoot)/DerailValley_Data/Managed/UnityModManager/0Harmony.dll"><Private>false</Private></Reference>
+    <Reference Include="$(GameRoot)/DerailValley_Data/Managed/UnityEngine.CoreModule.dll"><Private>false</Private></Reference>
+    <Reference Include="$(GameRoot)/DerailValley_Data/Managed/Assembly-CSharp.dll"><Private>false</Private></Reference>
+    <Reference Include="$(GameRoot)/DerailValley_Data/Managed/WorldStreamer.dll"><Private>false</Private></Reference>
+    <Reference Include="$(GameRoot)/DerailValley_Data/Managed/UnityModManager/UnityModManager.dll"><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>

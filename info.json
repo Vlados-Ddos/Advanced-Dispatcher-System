@@ -1,0 +1,11 @@
+{
+  "Id": "AdvancedDispatcherSystem",
+  "DisplayName": "Advanced Dispatcher System",
+  "Author": "7Vlad7",
+  "Version": "1.0.0",
+  "ManagerVersion": "0.32.4",
+  "AssemblyName": "AdvancedDispatcherSystem.dll",
+  "EntryMethod": "AdvancedDispatcherSystem.Game.Main.Load",
+  "LoadAfter": ["Multiplayer", "DoubleTrack", "DVSignals", "PassengerJobs", "PersistentJobsMod"],
+  "MultiplayerCompatibility": "Host"
+}

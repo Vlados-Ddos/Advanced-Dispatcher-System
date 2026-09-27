@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="theme-color" content="#121b23" />
+    <title>Advanced Dispatcher System</title>
+    <link rel="icon" href="/icon.svg" />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Advanced Dispatcher System"
+        ><img src="/icon.svg" width="34" height="34" alt="" /><span
+          ><strong>ADVANCED DISPATCHER SYSTEM</strong
+          ><small>DERAIL VALLEY</small></span
+        ></a
+      >
+      <span id="connection" class="connection"
+        ><i></i><span data-i18n="connecting">Connecting</span></span
+      >
+      <div class="top-actions">
+        <span id="account-name"></span
+        ><button id="logout" class="subtle" data-i18n="logout">Sign out</button>
+      </div>
+    </header>
+    <div id="notice" class="notice" tabindex="0" hidden></div>
+    <div id="dashboard" class="dashboard" aria-live="off"></div>
+    <main>
+      <div id="nav-frame" class="nav-frame">
+        <nav
+          id="tabs"
+          class="tabs"
+          aria-label="Object lists"
+          data-aria="objectLists"
+        ></nav>
+      </div>
+      <aside id="sidebar" class="sidebar">
+        <div class="sidebar-heading">
+          <div>
+            <h1 id="panel-heading" data-i18n="trains">Trains</h1>
+          </div>
+          <button
+            id="collapse"
+            class="square"
+            aria-label="Toggle sidebar"
+            data-aria="toggleSidebar"
+          >
+            ‹
+          </button>
+        </div>
+        <div id="list-controls" class="list-controls">
+          <div class="search">
+            <span>⌕</span
+            ><input
+              id="search"
+              autocomplete="off"
+              data-placeholder="search"
+              aria-label="Search"
+              data-aria="search"
+            />
+          </div>
+          <div id="signal-subtabs" class="signal-subtabs" hidden></div>
+          <div class="list-heading">
+            <span id="list-title"></span
+            ><span id="list-count" class="count">0</span
+            ><label
+              ><input id="active-only" type="checkbox" /><span
+                data-i18n="activeOnly"
+                >Active</span
+              ></label
+            >
+          </div>
+          <div id="list-filters" class="list-filters">
+            <select
+              id="status-filter"
+              aria-label="Filter"
+              data-aria="filter"
+            ></select
+            ><select
+              id="sort-order"
+              aria-label="Sort"
+              data-aria="sort"
+            ></select>
+          </div>
+          <p id="selected-job-note" hidden></p>
+          <div id="active-orders" class="active-orders" hidden></div>
+        </div>
+        <div id="object-list" class="object-list" role="list"></div>
+        <div id="location-list" class="location-list" hidden></div>
+        <div id="settings-panel" class="settings-panel" hidden></div>
+        <div class="sidebar-footer">
+          <span class="advisory-dot"></span
+          ><span data-i18n="advisoryShort">Advisory dispatch</span
+          ><small>v0.7.15</small>
+        </div>
+      </aside>
+      <section class="map-panel" aria-label="Railway map" data-aria="mapTitle">
+        <div class="map-toolbar">
+          <button id="fit" data-i18n="fit">Fit network</button
+          ><button id="home-player" data-i18n="playerHome">To players</button
+          ><button id="follow" data-i18n="follow">Follow</button>
+          <div class="toolbar-spacer"></div>
+
+          <button id="layers-button" data-i18n="layers">Layers</button
+          ><button id="theme-button" data-i18n="theme">Theme</button
+          ><button id="metrics-button" data-i18n="metrics">Metrics</button>
+        </div>
+        <div
+          id="map"
+          tabindex="0"
+          role="application"
+          aria-label="Railway map. Drag to pan; scroll to zoom."
+          data-aria="mapControls"
+        >
+          <canvas id="tracks"></canvas><canvas id="state"></canvas
+          ><canvas id="motion"></canvas><canvas id="infrastructure"></canvas
+          ><canvas id="interaction"></canvas>
+          <div id="empty-map">
+            <img src="/icon.svg" alt="" width="64" height="64" />
+            <h2 data-i18n="waitingWorld">Waiting for the railway</h2>
+            <p data-i18n="loadWorld">
+              Load a game to see live tracks and trains.
+            </p>
+          </div>
+          <div class="zoom-controls">
+            <button id="zoom-in" aria-label="Zoom in" data-aria="zoomIn">
+              +</button
+            ><button id="zoom-out" aria-label="Zoom out" data-aria="zoomOut">
+              −
+            </button>
+          </div>
+        </div>
+        <div id="layers" class="floating layers" hidden></div>
+        <div id="metrics" class="floating metrics" hidden></div>
+        <div id="route-focus" class="route-focus" hidden>
+          <span id="route-focus-name"></span>
+          <button id="exit-route-focus" data-i18n="exitRouteFocus">
+            Return to normal map
+          </button>
+        </div>
+        <div id="route-bar" class="route-bar" hidden></div>
+        <div class="map-footer">
+          <div class="legend">
+            <span><i class="free"></i><b data-i18n="free">Clear</b></span
+            ><span
+              ><i class="occupied"></i
+              ><b data-i18n="occupied">Occupied</b></span
+            ><span><i class="planned"></i><b data-i18n="planned">Plan</b></span
+            ><span><i class="train"></i><b data-i18n="trains">Trains</b></span>
+          </div>
+          <span class="legend"
+            ><span
+              ><i class="branch"></i
+              ><b data-i18n="branchLegend">Selected branch</b></span
+            ><span
+              ><i class="reservation"></i
+              ><b data-i18n="reservedLegend">Reserved</b></span
+            ><span
+              ><i class="selected-object"></i
+              ><b data-i18n="selectedLegend">Selected object</b></span
+            ></span
+          ><span id="scale"></span><span id="network-counts"></span>
+        </div>
+      </section>
+      <div id="inspector-frame" class="inspector-frame">
+        <aside
+          id="inspector"
+          class="inspector"
+          aria-label="Details"
+          data-aria="details"
+          hidden
+        ></aside>
+      </div>
+    </main>
+    <div id="toasts" aria-live="polite"></div>
+    <div
+      id="login-screen"
+      class="login-screen"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="login-heading"
+      hidden
+    >
+      <form id="login-form" class="login-card">
+        <img src="/icon.svg" alt="" width="48" height="48" /><small
+          >DERAIL VALLEY</small
+        >
+        <h1 id="login-heading">Advanced<br />Dispatcher System</h1>
+        <p data-i18n="signInHint">
+          Use the web account provided by the host. This is separate from your
+          in-game name.
+        </p>
+        <label
+          ><span data-i18n="username">Username</span
+          ><input
+            name="username"
+            autocomplete="username"
+            required
+            maxlength="48" /></label
+        ><label
+          ><span data-i18n="password">Password</span
+          ><input
+            name="password"
+            type="password"
+            autocomplete="current-password"
+            required
+            maxlength="128" /></label
+        ><button class="primary" type="submit" data-i18n="signIn">
+          Sign in
+        </button>
+        <p id="login-error" role="alert"></p>
+        <small data-i18n="loginHelp"
+          >Open from Unity Mod Manager for local owner access.</small
+        >
+      </form>
+    </div>
+    <script type="module" src="/src/app.js"></script>
+  </body>
+</html>

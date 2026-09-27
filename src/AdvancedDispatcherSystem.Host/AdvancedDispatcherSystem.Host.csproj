@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><AssemblyName>AdvancedDispatcherSystem.Host</AssemblyName></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../AdvancedDispatcherSystem.Core/AdvancedDispatcherSystem.Core.csproj" /></ItemGroup>
+  <ItemGroup><Content Include="../../Web/**" Link="wwwroot/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" /></ItemGroup>
+</Project>

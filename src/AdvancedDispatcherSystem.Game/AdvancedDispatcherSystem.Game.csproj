@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net48</TargetFramework><AssemblyName>AdvancedDispatcherSystem</AssemblyName></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../AdvancedDispatcherSystem.Core/RouteSignalRules.cs" Link="RouteSignalRules.cs" />
+    <Compile Include="../AdvancedDispatcherSystem.Core/TurntableRules.cs" Link="TurntableRules.cs" />
+    <Compile Include="../AdvancedDispatcherSystem.Core/TrackGraph.cs" Link="TrackGraph.cs" />
+    <Compile Include="../AdvancedDispatcherSystem.Core/RouteLocks.cs" Link="RouteLocks.cs" />
+    <Compile Include="../AdvancedDispatcherSystem.Core/Contracts.cs" Link="Contracts.cs" />
+    <Compile Include="../AdvancedDispatcherSystem.Core/Framing.cs" Link="Framing.cs" />
+    <Compile Include="../AdvancedDispatcherSystem.Core/MotionCodec.cs" Link="MotionCodec.cs" />
+    <Compile Include="../AdvancedDispatcherSystem.Core/IpcAuth.cs" Link="IpcAuth.cs" />
+    <Reference Include="$(GameRoot)/DerailValley_Data/Managed/*.dll" Exclude="$(GameRoot)/DerailValley_Data/Managed/mscorlib.dll;$(GameRoot)/DerailValley_Data/Managed/System*.dll;$(GameRoot)/DerailValley_Data/Managed/Mono.*.dll;$(GameRoot)/DerailValley_Data/Managed/Microsoft.*.dll;$(GameRoot)/DerailValley_Data/Managed/netstandard.dll"><Private>false</Private></Reference>
+    <Reference Include="$(GameRoot)/DerailValley_Data/Managed/UnityModManager/UnityModManager.dll"><Private>false</Private></Reference>
+    <Reference Include="$(GameRoot)/DerailValley_Data/Managed/UnityModManager/0Harmony.dll"><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>
