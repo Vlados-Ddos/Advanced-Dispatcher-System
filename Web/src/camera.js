@@ -5,6 +5,12 @@ export const zoomLimits = Object.freeze({ min: 0.005, max: 24, focus: 2 });
 export const clampZoom = (scale) =>
   Math.max(zoomLimits.min, Math.min(zoomLimits.max, scale));
 
+export function centreOnTarget(renderer, point) {
+  const area=mapViewport(renderer);
+  renderer.cx=point.x-(area.left+area.width/2-renderer.width/2)/renderer.scale;
+  renderer.cz=point.z+(area.top+area.height/2-renderer.height/2)/renderer.scale;
+}
+
 export function beginFocus(renderer, item, zoom = zoomLimits.focus) {
   const target = renderer.focusPosition(item);
   if (!target) return;
@@ -77,7 +83,8 @@ export function advanceFocus(renderer, now) {
   const canvasWidth=Number.isFinite(renderer.width)?renderer.width:0;
   const targetX=p.x-(area.left+area.width/2-canvasWidth/2)/renderer.scale;
   renderer.cx = f.x + (targetX - f.x) * ease;
-  renderer.cz = f.z + (p.z - f.z) * ease;
+  const targetZ=p.z+(area.top+area.height/2-(renderer.height||0)/2)/renderer.scale;
+  renderer.cz = f.z + (targetZ - f.z) * ease;
   renderer.invalidate();
   if (u === 1) {
     if (pending) {

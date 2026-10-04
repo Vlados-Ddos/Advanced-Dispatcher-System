@@ -1,14 +1,19 @@
 import { mapPalette, offsetPolyline } from "./map-palette.js";
 import { preferences } from "./preferences.js";
+export function activeRouteTracks(route) {
+  const released = new Set(route?.releasedTracks || []);
+  return (route?.tracks || []).filter(id => !released.has(id));
+}
 // Planned geometry is separate from live turntable alignment. Joining the two
 // specified mouths draws the intended through path without inventing game links.
 export function routeLines(route, store) {
   const lines = [];
-  for (const id of route?.tracks || []) {
+  for (const id of activeRouteTracks(route)) {
     const points = store.tracks.get(id)?.points;
     if (points?.length >= 4) lines.push(points);
   }
   for (const step of route?.turntables || []) {
+    if (route.releasedTracks?.includes(step.from) && route.releasedTracks?.includes(step.to)) continue;
     const from = store.tracks.get(step.from)?.points,
       to = store.tracks.get(step.to)?.points;
     if (
@@ -91,5 +96,42 @@ export function drawRoute(renderer, ctx, route, strong = false) {
   ctx.strokeStyle = renderer.colors.accent;
   ctx.lineWidth = ((strong ? 4 : 2.5) * preferences.trackScale) / 100;
   ctx.stroke();
+  ctx.restore();
+}
+
+export function drawRouteEditPreview(renderer, ctx, route) {
+  const preview = route?.editPreview;
+  if (!preview?.tracks?.length) return;
+  const proposed = { ...route, ...preview, releasedTracks: [] };
+  ctx.save();
+  ctx.lineJoin = ctx.lineCap = "round";
+  ctx.setLineDash([7, 4]);
+  ctx.strokeStyle = mapPalette.routePreview;
+  ctx.lineWidth = (4 * preferences.trackScale) / 100;
+  for (const line of routeLines(proposed, renderer.store)) {
+    ctx.beginPath();
+    for (let i = 0; i < line.length; i += 2) {
+      const p = renderer.project(line[i], line[i + 1]);
+      if (i) ctx.lineTo(...p);
+      else ctx.moveTo(...p);
+    }
+    ctx.stroke();
+  }
+  const affected = preview.affectedTrack;
+  if (affected) {
+    ctx.setLineDash([]);
+    ctx.strokeStyle = mapPalette.routeAffected;
+    ctx.lineWidth = (7 * preferences.trackScale) / 100;
+    const points = renderer.store.tracks.get(affected)?.points;
+    if (points?.length >= 4) {
+      ctx.beginPath();
+      for (let i = 0; i < points.length; i += 2) {
+        const p = renderer.project(points[i], points[i + 1]);
+        if (i) ctx.lineTo(...p);
+        else ctx.moveTo(...p);
+      }
+      ctx.stroke();
+    }
+  }
   ctx.restore();
 }

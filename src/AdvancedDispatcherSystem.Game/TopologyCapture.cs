@@ -34,7 +34,7 @@ namespace AdvancedDispatcherSystem.Game
         private IEnumerator BuildTopologyCore()
         {
             building = true; initialSample = false; scanning = false;
-            ResetRoutes("TOPOLOGY_CHANGED"); watchedRoutes.Clear(); executionGraph=null;
+            ResetRouteTopology();
             DetachJunctions();
             var registry = RailTrackRegistry.Instance;
             if (registry == null || registry.TrackRootParent == null) { building = false; RequestRebuild(2); yield break; }
@@ -88,7 +88,11 @@ namespace AdvancedDispatcherSystem.Game
                 Action<Junction.SwitchMode, int> handler = (mode, branch) => ReadSwitch(j); switchHandlers.Add(j, handler); j.Switched += handler; ReadSwitch(j);
             }
             var signIndex = BuildSignIndex(); while (signIndex.MoveNext()) yield return signIndex.Current;
-            topology = new Topology { epoch = epoch, revision = ++topologyRevision, tracks = trackDefs.ToArray(), junctions = junctionDefs.ToArray(), stations = CaptureStations(), turntables = tableDefs,
+            var stations = CaptureStations();
+            var spawnTracks = new HashSet<string>(stations.SelectMany(s => s.spawnTracks ?? new string[0]), StringComparer.Ordinal);
+            foreach (var track in trackDefs)
+                if (spawnTracks.Contains(track.id)) track.routePenalty = 180;
+            topology = new Topology { epoch = epoch, revision = ++topologyRevision, tracks = trackDefs.ToArray(), junctions = junctionDefs.ToArray(), stations = stations, turntables = tableDefs,
                 capture = new TopologyCaptureInfo { registeredTracks = tracks.Length, exportedTracks = trackDefs.Count, filteredLinks = filteredLinks, missingGeometry = missingGeometry.ToArray() } };
             executionGraph = new TrackGraph(topology);
             ClearChanges(); lastJobs = new JobState[0]; lastLocations = new StationDef[0]; nextJobs = 0;
@@ -137,10 +141,12 @@ namespace AdvancedDispatcherSystem.Game
             var component = trackOccupancy[index];
             if (component == null) trackOccupancy[index] = component = track.GetComponent<RailTrackBogiesOnTrack>();
             bool occupied = component != null && component.bogiesOnTrack.Count > 0;
+            var owners = component?.bogiesOnTrack?.Select(b => b == null ? null : b.Car?.CarGUID).ToArray() ?? new string[0];
+            bool ownersKnown = component != null && owners.Length == component.bogiesOnTrack.Count && owners.All(x => !string.IsNullOrEmpty(x));
             string id = TrackId(track);
-            if (id != null && (!occupancyStates.TryGetValue(id, out var previous) || previous.occupied != occupied || Protocol.Now - previous.sampledAt > 3000))
+            if (id != null && (!occupancyStates.TryGetValue(id, out var previous) || previous.occupied != occupied || previous.carsKnown != ownersKnown || !previous.cars.SequenceEqual(owners) || Protocol.Now - previous.sampledAt > 3000))
             {
-                var value = new OccupancyState { id = id, occupied = occupied, sampledAt = Protocol.Now }; occupancyStates[id] = value; changedOccupancy.Add(value);
+                var value = new OccupancyState { id = id, occupied = occupied, cars = ownersKnown ? owners.Distinct().ToArray() : new string[0], carsKnown = ownersKnown, sampledAt = Protocol.Now }; occupancyStates[id] = value; changedOccupancy.Add(value);
             }
         }
         private int LinkSignature(RailTrack track)

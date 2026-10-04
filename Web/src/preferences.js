@@ -43,6 +43,7 @@ const defaults = Object.fromEntries(
 );
 defaults.branchColor = "#ffffff";
 defaults.signalTooltip = true;
+defaults.switchClick = true;
 export function normalizePreferences(value = {}) {
   value = value && typeof value === "object" ? value : {};
   value = { ...value };
@@ -58,6 +59,10 @@ export function normalizePreferences(value = {}) {
       typeof value.signalTooltip === "boolean"
         ? value.signalTooltip
         : defaults.signalTooltip,
+    switchClick:
+      typeof value.switchClick === "boolean"
+        ? value.switchClick
+        : defaults.switchClick,
     branchColor: /^#[a-f\d]{6}$/i.test(value.branchColor || "")
       ? value.branchColor.toLowerCase()
       : defaults.branchColor,
@@ -84,6 +89,7 @@ export function readPreferences() {
       typeof saved === "object" &&
       ("signalStyle" in saved ||
         "nativeSignalScale" in saved ||
+        !("switchClick" in saved) ||
         ![
           "branchScale",
           "indicatorScale",
@@ -124,7 +130,7 @@ export function applyPreferences() {
   );
 }
 export function setPreference(key, value) {
-  if (!limits[key] && key !== "branchColor" && key !== "signalTooltip") return;
+  if (!limits[key] && key !== "branchColor" && key !== "signalTooltip" && key !== "switchClick") return;
   Object.assign(
     preferences,
     normalizePreferences({ ...preferences, [key]: value }),
@@ -138,11 +144,5 @@ export function rowHeight() {
     ((interfaceMetrics.rowHeight * preferences.interfaceScale) / 100) *
     Math.max(1, preferences.textScale / 100)
   );
-}
-export function resetPreferences() {
-  Object.assign(preferences, defaults);
-  removeSetting("ads.display");
-  applyPreferences();
-  window.dispatchEvent(new Event("ads-display"));
 }
 export { limits };

@@ -1,11 +1,19 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><TargetFramework>net48</TargetFramework><AssemblyName>AdvancedDispatcherSystem</AssemblyName></PropertyGroup>
   <ItemGroup>
+    <Compile Include="../AdvancedDispatcherSystem.Core/ConnectionSettingsRules.cs" Link="ConnectionSettingsRules.cs" />
     <Compile Include="../AdvancedDispatcherSystem.Core/RouteSignalRules.cs" Link="RouteSignalRules.cs" />
+    <Compile Include="../AdvancedDispatcherSystem.Core/SignalBlockIdentity.cs" Link="SignalBlockIdentity.cs" />
     <Compile Include="../AdvancedDispatcherSystem.Core/TurntableRules.cs" Link="TurntableRules.cs" />
     <Compile Include="../AdvancedDispatcherSystem.Core/TrackGraph.cs" Link="TrackGraph.cs" />
+    <Compile Include="../AdvancedDispatcherSystem.Core/OrderedRouteSearch.cs" Link="OrderedRouteSearch.cs" />
     <Compile Include="../AdvancedDispatcherSystem.Core/RouteLocks.cs" Link="RouteLocks.cs" />
+    <Compile Include="../AdvancedDispatcherSystem.Core/ReservationCompatibility.cs" Link="ReservationCompatibility.cs" />
+    <Compile Include="../AdvancedDispatcherSystem.Core/RouteProgressRules.cs" Link="RouteProgressRules.cs" />
+    <Compile Include="../AdvancedDispatcherSystem.Core/RouteConsistRules.cs" Link="RouteConsistRules.cs" />
     <Compile Include="../AdvancedDispatcherSystem.Core/Contracts.cs" Link="Contracts.cs" />
+    <Compile Include="../AdvancedDispatcherSystem.Core/JobSnapshotQuality.cs" Link="JobSnapshotQuality.cs" />
+    <Compile Include="../AdvancedDispatcherSystem.Core/JobRouteRules.cs" Link="JobRouteRules.cs" />
     <Compile Include="../AdvancedDispatcherSystem.Core/Framing.cs" Link="Framing.cs" />
     <Compile Include="../AdvancedDispatcherSystem.Core/MotionCodec.cs" Link="MotionCodec.cs" />
     <Compile Include="../AdvancedDispatcherSystem.Core/IpcAuth.cs" Link="IpcAuth.cs" />

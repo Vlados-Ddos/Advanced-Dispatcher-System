@@ -7,13 +7,14 @@ namespace AdvancedDispatcherSystem.Core
         {
             if (route?.tracks == null || route.directions == null || tracks == null || directions == null ||
                 tracks.Length == 0 || tracks.Length != directions.Length) return false;
-            for (int i = signalIndex; i < route.tracks.Length; i++) {
-                if (route.tracks[i] != tracks[0]) continue;
-                for (int b = 0; b < tracks.Length && i+b < route.tracks.Length; b++)
-                    if (tracks[b] != route.tracks[i+b] || directions[b] != route.directions[i+b]) return false;
-                return true;
-            }
-            return false;
+            if (signalIndex < 0 || signalIndex >= route.tracks.Length || route.tracks[signalIndex] != tracks[0]) return false;
+            // Native TrackBlock starts at the controller's oriented starting
+            // rail. Searching later in the route can accept a block from a
+            // different occurrence of the same physical rail, especially on
+            // loops or switch-to-switch sections. The start must be exact.
+            for (int b = 0; b < tracks.Length && signalIndex + b < route.tracks.Length; b++)
+                if (tracks[b] != route.tracks[signalIndex + b] || directions[b] != route.directions[signalIndex + b]) return false;
+            return true;
         }
         public static bool Applies(SignalState signal, RoutePlan route, int index, double origin)
         {
@@ -31,8 +32,11 @@ namespace AdvancedDispatcherSystem.Core
             // is insufficient, and ending before the fork chooses no head.
             for (int i = index; i + 1 < route.tracks.Length; i++) {
                 if (route.tracks[i] != signal.routeIncoming) continue;
-                if (route.directions[i + 1] != 1) return false;
-                return Array.IndexOf(signal.routeBranches, route.tracks[i + 1]) >= 0;
+                if (signal.routeIncomingDirection!=0 && route.directions[i]!=signal.routeIncomingDirection) return false;
+                int branch=Array.IndexOf(signal.routeBranches,route.tracks[i+1]);
+                if(branch<0) return false;
+                int direction=branch<(signal.routeBranchDirections?.Length??0)?signal.routeBranchDirections[branch]:1;
+                return route.directions[i+1]==direction;
             }
             return false;
         }

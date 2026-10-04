@@ -1,4 +1,5 @@
-import { isWagon } from "./rolling-stock.js";
+import { isLocomotive, isWagon } from "./rolling-stock.js";
+import { consistLoadRating } from "./locomotive-catalog.js";
 import { nativeMotionPath, sampleMotionPath } from "./railway-motion.js";
 import { recordPlayers, playerPosition } from "./player-motion.js";
 import { validateMessage } from "./state-validation.js";
@@ -119,6 +120,8 @@ export class Store extends EventTarget {
       old.vehicleCategory !== car.vehicleCategory ||
       old.locomotive !== car.locomotive ||
       old.length !== car.length ||
+      old.mass !== car.mass ||
+      old.massKnown !== car.massKnown ||
       old.order !== car.order
     )
       this.wagonGroupCache.delete(car.consist);
@@ -301,19 +304,54 @@ export class Store extends EventTarget {
       .filter(Boolean)
       .sort((a, b) => a.order - b.order);
     if (!cars.length) return null;
-    const head = cars.find((x) => x.locomotive) || cars[0];
+    const locomotives = cars.filter(isLocomotive);
+    const head = locomotives[0] || cars[0];
+    const lengthsKnown = cars.every(
+      (c) => Number.isFinite(Number(c.length)) && Number(c.length) > 0,
+    );
+    const massesKnown = cars.every(
+      (c) =>
+        c.massKnown === true &&
+        Number.isFinite(Number(c.mass)) &&
+        Number(c.mass) >= 0,
+    );
+    const tractionValuesKnown =
+      locomotives.length > 0 &&
+      locomotives.every(
+        (c) =>
+          c.tractionKnown === true &&
+          Number.isFinite(Number(c.availableTraction)) &&
+          Number(c.availableTraction) >= 0,
+      );
     return {
       ...head,
       id,
       name: head.name,
       kind: "trains",
       count: cars.length,
-      locomotiveCount: cars.filter((c) => c.locomotive).length,
+      locomotiveCount: locomotives.length,
       nativeTrainset: cars.some((c) => typeof c.nativeTrainset === "boolean")
         ? cars.some((c) => c.nativeTrainset)
         : undefined,
       wagonCount: cars.filter(isWagon).length,
-      length: cars.reduce((n, c) => n + c.length, 0),
+      length: lengthsKnown
+        ? cars.reduce((n, c) => n + Number(c.length), 0)
+        : null,
+      massKnown: massesKnown,
+      mass: massesKnown
+        ? cars.reduce((n, c) => n + (Number(c.mass) || 0), 0)
+        : 0,
+      consistMass: massesKnown
+        ? cars.reduce((n, c) => n + (Number(c.mass) || 0), 0)
+        : 0,
+      tractionKnown: tractionValuesKnown,
+      availableTraction: tractionValuesKnown
+        ? locomotives.reduce((n, c) => n + (Number(c.availableTraction) || 0), 0)
+        : 0,
+      // Catalogue values are only a conservative load-rating reference.  Add
+      // one entry per native locomotive so a multi-locomotive consist does not
+      // incorrectly inherit the lead unit's single-unit rating.
+      tractionRating: consistLoadRating(locomotives),
       carIds: cars.map((x) => x.id),
       cargo: [
         ...new Set(

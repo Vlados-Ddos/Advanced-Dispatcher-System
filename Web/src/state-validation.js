@@ -76,6 +76,15 @@ export function validateMessage(message, store) {
           Array.isArray(p[key]) && p[key].every((id) => typeof id === "string"),
         );
     for (const value of p.cars || [])
+      require(
+        Number.isFinite(value.mass ?? 0) &&
+          Number.isFinite(value.consistMass ?? 0) &&
+          Number.isFinite(value.availableTraction ?? 0) &&
+          (value.mass ?? 0) >= 0 &&
+          (value.consistMass ?? 0) >= 0 &&
+          (value.availableTraction ?? 0) >= 0,
+      );
+    for (const value of p.cars || [])
       if (value.consistCargo != null)
         require(
           Number.isInteger(value.consistCargo.cars) &&
@@ -114,6 +123,11 @@ export function validateMessage(message, store) {
             value.routeBranches.every((id) => typeof id === "string"),
         );
     for (const value of p.signals || [])
+      if (value.routeBranchDirections !== undefined)
+        require(Array.isArray(value.routeBranchDirections) &&
+          (value.routeBranchDirections.length===0 || value.routeBranchDirections.length===value.routeBranches?.length) &&
+          value.routeBranchDirections.every(d=>d===1||d===-1) && [-1,0,1].includes(value.routeIncomingDirection??0));
+    for (const value of p.signals || [])
       if (value.parts !== undefined)
         require(
           Array.isArray(value.parts) &&
@@ -144,8 +158,13 @@ export function validateMessage(message, store) {
       require(
         Number.isFinite(value.x) &&
           Number.isFinite(value.z) &&
-          Array.isArray(value.tracks) &&
-          value.tracks.every((id) => typeof id === "string"),
+           Array.isArray(value.tracks) &&
+          value.tracks.every((id) => typeof id === "string") &&
+          (value.stationTracks === undefined ||
+            (Array.isArray(value.stationTracks) &&
+              value.stationTracks.every(
+                (track) => track && typeof track.id === "string",
+              ))),
       );
     for (const value of p.turntables || [])
       require(
@@ -173,4 +192,34 @@ export function validateMessage(message, store) {
   if (message.type === "routes") require(Array.isArray(p));
   if (message.type === "event" || message.type === "capabilities")
     require(p && typeof p === "object");
+  const weather = message.type === "capabilities" ? p.weather : p?.capabilities?.weather;
+  if (weather != null)
+    require(
+      [weather.rain, weather.wetness, weather.thunder, weather.fog, weather.cloudiness].every(
+        (value) => value === undefined || Number.isFinite(value),
+      ),
+    );
+  if (weather?.forecast != null)
+    require(
+      Array.isArray(weather.forecast) &&
+        weather.forecast.every(
+          (entry) =>
+            entry &&
+            (entry.state === undefined || typeof entry.state === "string") &&
+            (entry.durationSeconds === undefined || Number.isFinite(entry.durationSeconds) && entry.durationSeconds >= 0) &&
+            (entry.startsInSeconds === undefined || Number.isFinite(entry.startsInSeconds) && entry.startsInSeconds >= 0),
+        ),
+      );
+  const hostSettings =
+    message.type === "capabilities" ? p.hostSettings : p?.capabilities?.hostSettings;
+  if (hostSettings != null)
+    require(
+      typeof hostSettings === "object" &&
+        typeof hostSettings.readOnly === "boolean" &&
+        typeof hostSettings.showUndiscovered === "boolean" &&
+        typeof hostSettings.adminControls === "boolean" &&
+        Number.isFinite(hostSettings.captureBudgetMs) &&
+        hostSettings.captureBudgetMs >= 0.3 &&
+        hostSettings.captureBudgetMs <= 2,
+    );
 }

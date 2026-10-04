@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using AdvancedDispatcherSystem.Core;
 using UnityEngine;
 using UnityModManagerNet;
@@ -78,9 +79,14 @@ namespace AdvancedDispatcherSystem.Game
             foreach (var station in PassengerLocations()) {
                 if (locations.TryGetValue(station.id, out var native)) {
                     native.passenger = station.passenger;
+                    native.nameEn = station.nameEn; native.nameRu = station.nameRu; native.code = station.code;
                     var tracks = new System.Collections.Generic.HashSet<string>(native.tracks);
                     foreach (var id in station.tracks) tracks.Add(id);
                     native.tracks = new System.Collections.Generic.List<string>(tracks).ToArray();
+                    var metadata = new System.Collections.Generic.Dictionary<string, StationTrackDef>(StringComparer.Ordinal);
+                    foreach (var row in native.stationTracks ?? new StationTrackDef[0]) if (row?.id != null) metadata[row.id] = row;
+                    foreach (var row in station.stationTracks ?? new StationTrackDef[0]) if (row?.id != null) metadata[row.id] = row;
+                    native.stationTracks = new System.Collections.Generic.List<StationTrackDef>(metadata.Values).OrderBy(row => row.id, StringComparer.Ordinal).ToArray();
                 } else locations[station.id] = station;
             }
             return new System.Collections.Generic.List<StationDef>(locations.Values).ToArray();

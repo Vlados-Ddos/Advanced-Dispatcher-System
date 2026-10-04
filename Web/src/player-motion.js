@@ -59,7 +59,7 @@ export function playerPosition(store, player, now) {
     store.cars.get(a.car);
   if (
     car &&
-    [a.carX, a.carZ, a.carYaw, b.carX, b.carZ, b.carYaw].every(Number.isFinite)
+    [a.carX, a.carZ, b.carX, b.carZ, a.yaw, b.yaw].every(Number.isFinite)
   ) {
     const pose = store.position(car, now),
       angle = (pose.yaw * Math.PI) / 180,
@@ -68,7 +68,13 @@ export function playerPosition(store, player, now) {
     return {
       x: pose.x + x * Math.cos(angle) + z * Math.sin(angle),
       z: pose.z - x * Math.sin(angle) + z * Math.cos(angle),
-      yaw: pose.yaw + mixAngle(a.carYaw, b.carYaw, u),
+      // `a.yaw`/`b.yaw` are the authoritative world-facing player heading.
+      // Rebuilding it as car heading + relative heading makes the two
+      // independently interpolated angles choose different 180° branches,
+      // which visibly turns an onboard marker sideways during reversals and
+      // multiplayer updates. The car pose is still used for the position;
+      // the arrow orientation follows the player's actual world rotation.
+      yaw: mixAngle(a.yaw, b.yaw, u),
     };
   }
   // Boarding, leaving and crossing between vehicles interpolate actual world

@@ -7,6 +7,10 @@ import {
 } from "./display-names.js";
 import { t, language } from "./localization.js";
 import { el } from "./dom.js";
+import {
+  jobTypeDisplayKey,
+  isLegacyJobName,
+} from "./job-types.js";
 
 export const neutralJobColor = "#98a6b0";
 export function jobColor(job) {
@@ -25,11 +29,12 @@ export function jobTypeText(job) {
   if (
     usableName(job?.typeName) &&
     job.typeLanguage === language() &&
-    !job.typeName.startsWith("passjobs/")
+    !job.typeName.startsWith("passjobs/") &&
+    !isLegacyJobName(job, job.typeName)
   )
     return job.typeName;
   if (!job?.type) return t("unknownJobType");
-  return localizedValue(job.type, "unknownJobType");
+  return t(jobTypeDisplayKey(job)) || localizedValue(job.type, "unknownJobType");
 }
 export function relatedJobs(store, carIds) {
   const ids = new Set(carIds || []);
@@ -71,6 +76,13 @@ function typePalette(store) {
   });
   return colors;
 }
+export function jobColorForStore(store, job) {
+  // Preserve the producer's spelling for DOM/style consumers; use the
+  // normalized palette only when this particular job record lacks a color.
+  return validColor(job?.typeColor)
+    ? job.typeColor
+    : typePalette(store).get(jobTypeKey(job)) || neutralJobColor;
+}
 export function primaryJob(store, car) {
   let index = indexes.get(store);
   if (
@@ -107,6 +119,20 @@ export function primaryJob(store, car) {
       ? linked
       : null)
   );
+}
+export function carJobVisual(store, carOrGroup) {
+  const ids = carOrGroup?.carIds || (carOrGroup?.id ? [carOrGroup.id] : []);
+  const jobs = [];
+  for (const id of ids) {
+    const job = primaryJob(store, store.cars.get(id) || { id });
+    if (job && !jobs.some((value) => value.id === job.id)) jobs.push(job);
+  }
+  if (jobs.length === 1) return jobs[0];
+  if (jobs.length > 1) {
+    const keys = new Set(jobs.map(jobTypeKey));
+    if (keys.size === 1) return jobs[0];
+  }
+  return null;
 }
 export function colorBadge(job, color = jobColor(job)) {
   const badge = el("span", jobTypeText(job), "job-type-badge");
@@ -168,7 +194,7 @@ export function colorLegend(store, mode) {
       root.append(
         colorBadge(
           job,
-          typePalette(store).get(jobTypeKey(job)) || neutralJobColor,
+          jobColorForStore(store, job) || neutralJobColor,
         ),
       );
     root.append(

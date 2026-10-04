@@ -1,3 +1,5 @@
+import { jobTypeIconKey } from "./job-types.js";
+
 // Exact producer types: DV JobType and Passenger adapter's PassJobType mapping.
 // Unknown extension jobs remain unclassified; no ID or text heuristics.
 const paths = {
@@ -11,7 +13,8 @@ const paths = {
   unknown: "M4 4h16v16H4z M9 9a3 3 0 0 1 6 0c0 2-3 2-3 4 M12 16v.1",
 };
 export function jobIconKind(job) {
-  return Object.hasOwn(paths, job?.type) ? job.type : "unknown";
+  const key = jobTypeIconKey(job);
+  return Object.hasOwn(paths, key) ? key : "unknown";
 }
 export function jobIcon(job) {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");

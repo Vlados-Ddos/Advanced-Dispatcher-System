@@ -42,14 +42,44 @@ namespace AdvancedDispatcherSystem.Core
         }
         public static bool Aligned(TurntableState state, TurntableStep step) => state != null && !state.moving &&
             ((state.front == step.from && state.rear == step.to && (step.fromEnd<0 || state.frontEnd==step.fromEnd) && (step.toEnd<0 || state.rearEnd==step.toEnd)) || (state.front == step.to && state.rear == step.from && (step.toEnd<0 || state.frontEnd==step.toEnd) && (step.fromEnd<0 || state.rearEnd==step.fromEnd)));
+        private static double DistanceToCar(double x, double z, CarState car)
+        {
+            // Treat the runtime body as an oriented rectangle.  The previous
+            // centre-circle test (radius + length/2) marked parallel cars
+            // outside the table's clearance as occupants.  Rotation and
+            // width come from the native TrainCar sample, so a body that
+            // actually overlaps the bridge remains blocked.
+            var radians = car.yaw * Math.PI / 180.0;
+            var cos = Math.Cos(radians); var sin = Math.Sin(radians);
+            var dx = x - car.x; var dz = z - car.z;
+            // Unity's forward is +Z at yaw=0 and +X at yaw=90.
+            var along = dx * sin + dz * cos;
+            var across = dx * cos - dz * sin;
+            var halfLength = Math.Max(1, car.length) / 2;
+            var halfWidth = Math.Max(1, car.width) / 2;
+            var outsideX = Math.Max(Math.Abs(along) - halfLength, 0);
+            var outsideZ = Math.Max(Math.Abs(across) - halfWidth, 0);
+            return Math.Sqrt(outsideX * outsideX + outsideZ * outsideZ);
+        }
         public static string Safety(double radius, IEnumerable<CarState> cars, double x, double z, string bridge)
         {
             foreach (var car in cars)
             {
+                // Persistent Jobs removes the runtime TrainCar during suspend
+                // and leaves the last sampled geometry in the dispatch cache.
+                // That lifecycle state is not physical occupancy and must not
+                // make a free table appear occupied until Resume rebinds it.
+                if (!string.IsNullOrEmpty(car.availability) &&
+                    !string.Equals(car.availability, "available", StringComparison.OrdinalIgnoreCase))
+                    continue;
                 if (car.track1 == bridge || car.track2 == bridge) return "TURNTABLE_OCCUPIED";
-                double distance = Math.Sqrt((car.x-x)*(car.x-x)+(car.z-z)*(car.z-z));
+                double distance = DistanceToCar(x, z, car);
                 double speed = Math.Abs(car.speed) / 3.6;
-                double clearance = radius + Math.Max(1, car.length) / 2 + 8;
+                // The native controller searches for track ends within its
+                // own radius.  Add the documented 8 m dispatch safety margin
+                // to the *rectangle-vs-circle* distance, instead of folding
+                // half the body length into a centre-radius heuristic.
+                double clearance = radius + 8;
                 if (distance < clearance) return "TURNTABLE_OCCUPIED";
                 if (speed > .2 && distance < clearance + 20 + speed * speed / 2) return "TURNTABLE_APPROACHING";
             }

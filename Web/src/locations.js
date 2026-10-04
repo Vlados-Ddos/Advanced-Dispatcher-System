@@ -137,7 +137,7 @@ export function renderLocations(ui) {
       );
   if (!items.length) fragment.append(el("p", t("noLocations"), "empty-list"));
   const status = ui.store.capabilities.passengerStatus || "absent";
-  if (status !== "ready")
+  if (status !== "ready" && status !== "absent")
     fragment.append(
       el("p", t("passengerStatus_" + status), "integration-note"),
     );
@@ -163,14 +163,85 @@ export function locationDetails(ui, root, location) {
       (s) => s.id === location.parent && s.id !== location.id,
     );
     if (parent)
-      ui.button(root, "parentLocation", () => ui.pick("locations", parent));
+      ui.button(root, "parentLocation", () => {
+        if(ui.navigationStack.at(-1)?.selection.id===parent.id)ui.backDetails();
+        else ui.pick("locations",parent);
+      });
   }
-  for (const id of location.tracks || []) {
+  const rows = (location.stationTracks || [])
+    .filter((row) => row && typeof row.id === "string" && ui.store.tracks.has(row.id))
+    .slice()
+    .sort((a, b) => String(a.group || "other").localeCompare(String(b.group || "other"), language(), { numeric: true }) ||
+      String(a.name || a.fullName || a.id).localeCompare(String(b.name || b.fullName || b.id), language(), { numeric: true }));
+  const stops = passengerStop(location) ? [] : allLocations(ui.store).filter(item =>
+    passengerStop(item) && item.id !== location.id && item.parent === location.id);
+  // Preserve the semantic Passenger Jobs view for older/incomplete captures
+  // that have platform children but no native track metadata yet.
+  if (!rows.length && stops.length) {
+    const stopGroups = new Map();
+    for (const stop of stops) {
+      const key = stop.trackGroup || "other";
+      if (!stopGroups.has(key)) stopGroups.set(key, []);
+      stopGroups.get(key).push(stop);
+    }
+    for (const [key, entries] of [...stopGroups.entries()].sort((a, b) => String(a[0]).localeCompare(String(b[0]), language(), { numeric: true }))) {
+      const section = el("details", undefined, "location-stop-group");
+      section.dataset.key = "location-stop-group-" + key;
+      section.open = false;
+      section.append(el("summary", (key === "other" ? t("otherLocations") : t("platformGroup") + " " + key) + " · " + entries.length));
+      for (const stop of entries) {
+        const button = el("button", locationName(ui.store, stop));
+        button.dataset.key = "location-stop-" + stop.id;
+        button.onclick = () => ui.pickNested("locations", stop);
+        section.append(button);
+      }
+      root.append(section);
+    }
+    return;
+  }
+  const groups = new Map();
+  for (const row of rows) {
+    const key = row.group || "other";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  // Older captures may not yet carry stationTracks. Keep the same resolver
+  // path for those records, but never invent a group from a label.
+  if (!rows.length) for (const id of location.tracks || []) {
     const track = ui.store.tracks.get(id);
     if (!track) continue;
-    const b = el("button", trackName(ui.store, track));
-    b.dataset.key = "location-track-" + id;
-    b.onclick = () => ui.pick("tracks", track);
-    root.append(b);
+    if (!groups.has("other")) groups.set("other", []);
+    groups.get("other").push({ id, name: trackName(ui.store, track), fullName: track.name, group: "other" });
+  }
+  for (const [key, entries] of [...groups.entries()].sort((a, b) => String(a[0]).localeCompare(String(b[0]), language(), { numeric: true }))) {
+    const section = el("details", undefined, "location-stop-group");
+    section.dataset.key = "location-track-group-" + key;
+    section.open = false;
+    section.append(el("summary", (key === "other" ? t("otherLocations") : t("platformGroup") + " " + key) + " · " + entries.length));
+    for (const row of entries) {
+      const track = ui.store.tracks.get(row.id);
+      if (!track) continue;
+      const label = row.name || row.fullName || trackName(ui.store, track);
+      const button = el("button", label + (row.fullName && row.fullName !== label ? " · " + row.fullName : ""));
+      button.dataset.key = "location-track-" + row.id;
+      button.onclick = () => ui.pickNested("tracks", track);
+      section.append(button);
+    }
+    root.append(section);
+  }
+  // Passenger platform locations remain useful as nested semantic stops when
+  // the game exposes them, but they are secondary to the authoritative track
+  // groups above and never replace or hide a real station track.
+  if (stops.length) {
+    const section = el("details", undefined, "location-stop-group");
+    section.dataset.key = "location-passenger-stops";
+    section.append(el("summary", t("passengerStops") + " · " + stops.length));
+    for (const stop of stops) {
+      const button = el("button", locationName(ui.store, stop));
+      button.dataset.key = "location-stop-" + stop.id;
+      button.onclick = () => ui.pickNested("locations", stop);
+      section.append(button);
+    }
+    root.append(section);
   }
 }

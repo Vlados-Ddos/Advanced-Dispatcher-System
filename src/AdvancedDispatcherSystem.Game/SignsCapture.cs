@@ -7,6 +7,7 @@ using System.Reflection;
 using System.Security.Cryptography;
 using System.Threading.Tasks;
 using AdvancedDispatcherSystem.Core;
+using DV.Logic.Job;
 using DV.Signs;
 using HarmonyLib;
 using Newtonsoft.Json;
@@ -55,7 +56,7 @@ namespace AdvancedDispatcherSystem.Game
             Install(typeof(SignPlacer), "NATIVE_SIGN_HOOK_FAILED");
             // Unity paths captured here; worker below uses only files and copied DTOs.
             string file = Path.Combine(Main.Entry.Path, "Assets", "signs.json"), data = Application.dataPath;
-            catalogueTask = Task.Run(() =>
+            catalogueTask = System.Threading.Tasks.Task.Run(() =>
             {
                 if (!File.Exists(file)) return null;
                 var value = JsonConvert.DeserializeObject<Catalogue>(File.ReadAllText(file));
@@ -204,14 +205,47 @@ namespace AdvancedDispatcherSystem.Game
             foreach (var station in StationController.allStations)
             {
                 if (station == null || station.stationInfo == null) continue;
-                var ids = new List<string>(); if (station.AllStationTracks != null) foreach (var t in station.AllStationTracks) { var id = TrackId(t); if (id != null) ids.Add(id); }
+                var ids = new List<string>(); var stationTracks = new List<StationTrackDef>();
+                if (station.AllStationTracks != null) foreach (var t in station.AllStationTracks)
+                {
+                    // AllStationTracks is a native collection, but it can contain
+                    // a null entry while a scene is being rebuilt.  Treat that as
+                    // a transient omission and keep the rest of the authoritative
+                    // station list.  A track can also be exposed by both a platform
+                    // and the station aggregate; publish one metadata row per
+                    // physical TrackId so the inspector cannot render duplicates.
+                    if (t == null) continue;
+                    var id = TrackId(t); if (id == null || ids.Contains(id)) continue;
+                    ids.Add(id);
+                    var native = t.LogicTrack()?.ID;
+                    stationTracks.Add(new StationTrackDef { id = id, name = native?.TrackPartOnly ?? t.name, fullName = native?.FullDisplayID ?? t.name, group = native?.SignIDSubYardPart, direction = 0 });
+                }
                 var p = station.transform.position - WorldMover.currentMove;
                 var info = station.stationInfo;
                 // The shipped StationInfo.Type is blank. Authored station names explicitly
                 // identify City West/South and the four combined industry & Town locations.
                 bool city = info.Name.StartsWith("City ", StringComparison.OrdinalIgnoreCase) || info.Name.EndsWith(" & Town", StringComparison.OrdinalIgnoreCase);
                 string name = DisplayText.Station(station);
-                result.Add(new StationDef { id = info.YardID, name = name, searchNames = DisplayText.SearchNames(info.LocalizationKey, info.Name), type = info.Type, color = "#" + ColorUtility.ToHtmlStringRGB(info.StationColor), city = city, source = "Derail Valley", x = p.x, z = p.z, tracks = ids.ToArray(), industry = station.warehouseMachineControllers?.Count > 0 });
+                var spawn = new HashSet<string>(StringComparer.Ordinal);
+                // WarehouseMachineController exposes the authored operational
+                // track name in the native data. Read it reflectively because
+                // the field is private in some game builds, and never infer a
+                // spawn track from a display name or numeric ID.
+                if (station.warehouseMachineControllers != null)
+                    foreach (var machine in station.warehouseMachineControllers)
+                    {
+                        if (machine == null) continue;
+                        var field = machine.GetType().GetField("warehouseTrackName", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                        var target = field?.GetValue(machine) as string;
+                        if (string.IsNullOrWhiteSpace(target)) continue;
+                        if (station.AllStationTracks != null)
+                            foreach (var track in station.AllStationTracks)
+                                if (track != null && string.Equals(track.name, target, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    var id = TrackId(track); if (id != null) spawn.Add(id);
+                                }
+                    }
+                result.Add(new StationDef { id = info.YardID, name = name, code = info.YardID, nameEn = DisplayText.Translation(info.LocalizationKey, "English"), nameRu = DisplayText.Translation(info.LocalizationKey, "Russian"), searchNames = DisplayText.SearchNames(info.LocalizationKey, info.Name), type = info.Type, color = "#" + ColorUtility.ToHtmlStringRGB(info.StationColor), city = city, source = "Derail Valley", x = p.x, z = p.z, tracks = ids.ToArray(), stationTracks = stationTracks.ToArray(), spawnTracks = new List<string>(spawn).ToArray(), industry = station.warehouseMachineControllers?.Count > 0 });
             }
             return result.ToArray();
         }

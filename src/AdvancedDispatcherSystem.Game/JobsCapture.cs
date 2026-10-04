@@ -34,10 +34,22 @@ namespace AdvancedDispatcherSystem.Game
             if (a.Length != b.Length) return false;
             for (int i = 0; i < a.Length; i++) {
                 var x = a[i]; var y = b[i];
-                if (x.id != y.id || x.name != y.name || x.type != y.type || x.source != y.source || x.parent != y.parent ||
-                    x.code != y.code || x.platform != y.platform || x.platformLabel != y.platformLabel || x.color != y.color ||
+                if (x.id != y.id || x.name != y.name || x.nameEn != y.nameEn || x.nameRu != y.nameRu || x.type != y.type || x.source != y.source || x.parent != y.parent ||
+                    x.code != y.code || x.platform != y.platform || x.platformLabel != y.platformLabel || x.trackGroup != y.trackGroup || x.color != y.color ||
                     x.x != y.x || x.z != y.z || x.industry != y.industry || x.city != y.city || x.passenger != y.passenger ||
-                    !x.tracks.SequenceEqual(y.tracks) || !x.searchNames.SequenceEqual(y.searchNames)) return false;
+                    !x.tracks.SequenceEqual(y.tracks) || !x.spawnTracks.SequenceEqual(y.spawnTracks) || !x.searchNames.SequenceEqual(y.searchNames) ||
+                    !SameStationTracks(x.stationTracks, y.stationTracks)) return false;
+            }
+            return true;
+        }
+        private static bool SameStationTracks(StationTrackDef[] a, StationTrackDef[] b)
+        {
+            a ??= new StationTrackDef[0]; b ??= new StationTrackDef[0];
+            if (a.Length != b.Length) return false;
+            for (int i = 0; i < a.Length; i++)
+            {
+                var x = a[i]; var y = b[i];
+                if (x == null || y == null || x.id != y.id || x.name != y.name || x.fullName != y.fullName || x.group != y.group || x.direction != y.direction) return false;
             }
             return true;
         }
@@ -64,6 +76,8 @@ namespace AdvancedDispatcherSystem.Game
             if (job.State == DV.ThingTypes.JobState.Completed || job.State == DV.ThingTypes.JobState.Abandoned || job.State == DV.ThingTypes.JobState.Expired)
             {
                 if (terminalJobs.Count < 250) terminalJobs[job] = Math.Max(0, job.State == DV.ThingTypes.JobState.Completed ? job.GetJobCompletionTime() : job.State == DV.ThingTypes.JobState.Expired ? 0 : job.GetTimeOnJob());
+                foreach(var route in watchedRoutes.Values.Where(r=>r.state.lifecycle=="active"&&r.plan.jobId==job.ID).ToArray())
+                    ReleaseWatchedRoute(route,job.State==DV.ThingTypes.JobState.Completed?"completed":"cancelled",null);
             }
         }
         private IEnumerator CaptureJobs()
@@ -74,8 +88,10 @@ namespace AdvancedDispatcherSystem.Game
             var capturePassenger = passenger; var captureJobsRevision = jobsRevision;
             try
             {
-                var manager = JobsManager.Instance; if (manager == null) yield break;
-                var jobCars = JobCars(manager); if (jobCars == null) yield break;
+                var manager = JobsManager.Instance;
+                if (manager == null) { RequestJobs(); yield break; }
+                var jobCars = JobCars(manager);
+                if (jobCars == null) { RequestJobs(); yield break; }
                 var locations = CaptureLocations();
                 var source = new HashSet<Job>(jobCars.Keys);
                 foreach (var job in manager.currentJobs) source.Add(job);
@@ -101,7 +117,19 @@ namespace AdvancedDispatcherSystem.Game
                             while (jobHistory.Count > 250) { jobStartDates.Remove(jobHistoryOrder.First.Value); jobHistory.Remove(jobHistoryOrder.First.Value); jobHistoryOrder.RemoveFirst(); }
                             terminalJobs.Remove(job);
                         }
-                        else { jobHistory.Remove(captured.id); jobHistoryOrder.Remove(captured.id); result.Add(captured); }
+                        else
+                        {
+                            var previous = lastJobs.FirstOrDefault(j => j.id == captured.id);
+                            if (captured.dataQuality == "stale" && !JobSnapshotQuality.KeepMissingRuntime(previous, captured.cars, false))
+                            {
+                                // replaceJobs is authoritative. A previously
+                                // bound car that is now absent and not marked
+                                // suspended means the order left the game;
+                                // retaining stale here creates a ghost order.
+                                jobHistory.Remove(captured.id); jobHistoryOrder.Remove(captured.id); continue;
+                            }
+                            jobHistory.Remove(captured.id); jobHistoryOrder.Remove(captured.id); result.Add(captured);
+                        }
                     }
                     catch (Exception e)
                     {
@@ -119,7 +147,10 @@ namespace AdvancedDispatcherSystem.Game
                     yield return null;
                 }
                 if (!world || building || epoch != captureEpoch || topologyRevision != captureRevision || capturePassenger != passenger || captureJobsRevision != jobsRevision) { RequestJobs(); yield break; }
-                result.AddRange(jobHistory.Values);
+                // `replaceJobs` is the authoritative current Orders snapshot.
+                // Terminal jobs stay in the bounded in-memory history for
+                // event timing, but publishing that history here resurrects
+                // completed/expired orders in the live Orders tab.
                 carJobs.Clear(); foreach (var pair in links) carJobs[pair.Key] = pair.Value;
                 lastJobs = result.ToArray();
                 bool locationsChanged = !SameLocations(lastLocations, locations);
@@ -131,22 +162,63 @@ namespace AdvancedDispatcherSystem.Game
         private JobState ReadJob(Job job, JobsManager manager, Dictionary<string, Tuple<string, string>> mapping)
         {
             var legs = new List<JobLeg>();
-            foreach (var task in job.tasks) ReadTask(task.GetTaskData(), legs, 0);
-            double length = 0, mass = 0;
+            for(int i=0;i<job.tasks.Count;i++)
+                JobTaskCapture.Read(job.tasks[i],i.ToString(),job.State==DV.ThingTypes.JobState.InProgress,legs,ReadTask);
+            double length = 0, mass = 0; bool massKnown = true;
             var ids = new List<string>(); var cargo = new HashSet<string>();
+            bool runtimeUnavailable = false, onlyExplicitlySuspended = true, missingRuntime = false;
             int done = 0;
             foreach (var leg in legs) { if (leg.state == "Done") done++; foreach (var c in leg.cargo) cargo.Add(c); }
             bool active = job.State == DV.ThingTypes.JobState.InProgress;
             var all = JobCars(manager);
-            if (all != null && all.TryGetValue(job, out var jobCars))
-                foreach (var logicCar in jobCars)
+            var previous = lastJobs.FirstOrDefault(j => j.id == job.ID);
+            HashSet<Car> jobCars = null;
+            bool membershipKnown = all != null && all.TryGetValue(job, out jobCars) && jobCars != null;
+            // A lost registry entry is different from a new generated job with
+            // a known empty car set. Never publish a previously bound order as
+            // ready/empty: that bypasses the stale/removal rules in CaptureJobs.
+            if (!membershipKnown || jobCars.Count == 0 && previous?.cars?.Length > 0)
+            {
+                runtimeUnavailable = true; onlyExplicitlySuspended = false;
+                missingRuntime = true; massKnown = false;
+            }
+            if (membershipKnown)
+            foreach (var logicCar in jobCars)
                 {
-                    var car = logicCar.TrainCar(); if (car == null) continue;
+                    if (logicCar == null) { runtimeUnavailable = true; onlyExplicitlySuspended = false; missingRuntime = true; massKnown = false; continue; }
+                    string stableId = PersistentJobRuntime.StableGuid(logicCar);
+                    PersistentJobRuntime.TryResolve(logicCar, out var car);
+                    if (car == null)
+                    {
+                        if (!string.IsNullOrEmpty(stableId) && IsPersistentSuspended(stableId))
+                        {
+                            ids.Add(stableId);
+                            if (!mapping.ContainsKey(stableId)) mapping[stableId] = Tuple.Create(job.ID, job.chainData?.chainDestinationYardId);
+                            runtimeUnavailable = true;
+                            massKnown = false;
+                            continue;
+                        }
+                        // A logical car that is absent from both the runtime
+                        // registry and Persistent Jobs' suspended map has been
+                        // deleted or otherwise lost. Do not resurrect its old
+                        // GUID from lastJobs; retain the order visibly stale so
+                        // native state remains the source of truth.
+                        runtimeUnavailable = true;
+                        onlyExplicitlySuspended = false;
+                        missingRuntime = true;
+                        massKnown = false;
+                        continue;
+                    }
                     ids.Add(car.CarGUID);
                     if (logicCar.CurrentCargoTypeInCar != CargoType.None && logicCar.LoadedCargoAmount > 0) cargo.Add(JobPresentation.CargoName(logicCar.CurrentCargoTypeInCar));
                     if ((active || job.State == DV.ThingTypes.JobState.Available) && (!mapping.TryGetValue(car.CarGUID, out var linked) || active && !sourceJobActive(linked.Item1))) mapping[car.CarGUID] = Tuple.Create(job.ID, job.chainData?.chainDestinationYardId);
                     length += car.InterCouplerDistance;
-                    mass += car.massController != null ? car.massController.TotalMass : logicCar.carType.parentType.mass;
+                    // A catalogue empty mass is not the current loaded mass.
+                    // Keep the previous authoritative job total until the
+                    // native TrainMassController has produced a live value.
+                    if (car.massController != null && car.massController.TotalMass > 0 && !float.IsNaN(car.massController.TotalMass) && !float.IsInfinity(car.massController.TotalMass))
+                        mass += car.massController.TotalMass;
+                    else massKnown = false;
                 }
             var licenses = new List<string>();
             foreach (JobLicenses license in Enum.GetValues(typeof(JobLicenses))) if ((int)license > 0 && (((int)license & ((int)license - 1)) == 0) && (job.requiredLicenses & license) == license) licenses.Add(license.ToString());
@@ -154,7 +226,18 @@ namespace AdvancedDispatcherSystem.Game
             string owner = null, ownerKey = null;
             string ownerStatus = job.State == DV.ThingTypes.JobState.Available || job.State == DV.ThingTypes.JobState.Expired ? "unassigned" : JobOwnership.ReadIdentity(job.ID, multiplayer.Mode, out owner, out ownerKey);
             jobStartDates.TryGetValue(job.ID, out var startedGameDate);
-            var captured = new JobState { id = job.ID, type = job.jobType.ToString(), state = job.State.ToString(), active = active, owner = owner, ownerKey = ownerKey, ownerStatus = ownerStatus, startedGameDate = startedGameDate, origin = job.chainData?.chainOriginYardId, destination = job.chainData?.chainDestinationYardId, length = length, mass = mass / 1000, payment = job.GetBasePaymentForTheJob(), bonus = job.GetPotentialBonusPaymentForTheJob(), elapsedSeconds = Math.Max(0, elapsed), elapsedKnown = active || job.State == DV.ThingTypes.JobState.Completed || terminalJobs.ContainsKey(job), bonusLimitSeconds = job.TimeLimit + 60, sampledAt = Protocol.Now, sampledGameTime = manager.Time, tasksDone = done, tasksTotal = legs.Count, cars = ids.ToArray(), cargo = new List<string>(cargo).ToArray(), licenses = licenses.ToArray(), legs = legs.ToArray() };
+            if (runtimeUnavailable && onlyExplicitlySuspended && previous != null)
+            {
+                // A partial sum of the cars still in the runtime is not the
+                // order's total. Keep the last complete total during suspend,
+                // visibly qualified by dataQuality until the full set resumes.
+                length = previous.length;
+                if (!massKnown) { mass = previous.mass * 1000; massKnown = previous.massKnown; }
+                foreach (var id in previous.cars ?? new string[0]) if (!ids.Contains(id)) ids.Add(id);
+                foreach (var value in previous.cargo ?? new string[0]) cargo.Add(value);
+            }
+            if (!massKnown) mass = 0;
+            var captured = new JobState { id = job.ID, type = job.jobType.ToString(), state = job.State.ToString(), active = active, owner = owner, ownerKey = ownerKey, ownerStatus = ownerStatus, startedGameDate = startedGameDate, origin = job.chainData?.chainOriginYardId, destination = job.chainData?.chainDestinationYardId, length = length, mass = mass / 1000, massKnown = massKnown && mass > 0, payment = job.GetBasePaymentForTheJob(), bonus = job.GetPotentialBonusPaymentForTheJob(), elapsedSeconds = Math.Max(0, elapsed), elapsedKnown = !missingRuntime && (active || job.State == DV.ThingTypes.JobState.Completed || terminalJobs.ContainsKey(job)), bonusLimitSeconds = job.TimeLimit + 60, sampledAt = Protocol.Now, sampledGameTime = manager.Time, tasksDone = done, tasksTotal = legs.Count, cars = ids.ToArray(), cargo = new List<string>(cargo).ToArray(), licenses = licenses.ToArray(), legs = legs.ToArray(), dataQuality = missingRuntime ? "stale" : runtimeUnavailable ? "suspended" : "ready" };
             JobPresentation.Apply(job.jobType, captured);
             if (passenger != null) {
                 try { passenger.EnrichJob(job, captured); }
@@ -164,22 +247,50 @@ namespace AdvancedDispatcherSystem.Game
             return captured;
             bool sourceJobActive(string id) => manager.currentJobs.Any(j => j != null && j.ID == id && j.State == DV.ThingTypes.JobState.InProgress);
         }
-        private void ReadTask(TaskData task, List<JobLeg> legs, int depth)
+
+        private JobLeg ReadTask(Task nativeTask, TaskData task)
         {
-            if (task == null || depth > 16) return;
-            if (task.nestedTasks != null && task.nestedTasks.Count > 0)
-            { foreach (var nested in task.nestedTasks) ReadTask(nested.GetTaskData(), legs, depth + 1); return; }
             string destination = task.destinationTrack?.ID?.FullDisplayID;
-            var ids = new List<string>(); if (task.cars != null) foreach (var car in task.cars) ids.Add(car.ID);
+            var ids = new List<string>(); if (task.cars != null) foreach (var car in task.cars) {
+                if (car == null) continue;
+                PersistentJobRuntime.TryResolve(car, out var native);
+                if(native!=null) ids.Add(native.CarGUID);
+                else if (!string.IsNullOrEmpty(PersistentJobRuntime.StableGuid(car))) ids.Add(PersistentJobRuntime.StableGuid(car));
+            }
             var cargo = new HashSet<string>(); if (task.cargoTypePerCar != null) foreach (var c in task.cargoTypePerCar) cargo.Add(JobPresentation.CargoName(c));
             string FindTrack(DV.Logic.Job.Track logic) { if (logic == null) return null; return TrackId(logic.RailTrack()); }
             var leg = new JobLeg { from = task.startTrack?.ID?.FullDisplayID ?? "", to = destination ?? "", fromTrack = FindTrack(task.startTrack), toTrack = FindTrack(task.destinationTrack), type = task.type.ToString(), state = task.state.ToString(), cars = ids.ToArray(), cargo = new List<string>(cargo).ToArray(), cargoAmount = task.totalCargoAmount, couplingRequired = task.couplingRequiredAndNotDone, handbrakeRequired = task.anyHandbrakeRequiredAndNotDone };
+            leg.operation=task.warehouseTaskType.ToString();
             if (passenger != null) {
-                try { passenger.EnrichTask(task, leg); }
+                try { passenger.EnrichTask(nativeTask, task, leg); }
                 catch (Exception e) { DropPassenger(e); }
             }
-            legs.Add(leg);
+            return leg;
         }
+        private string RouteOrderState(RoutePlan plan) => string.IsNullOrEmpty(plan.jobId)?null:
+            JobsManager.Instance==null?"JOB_TASK_UNAVAILABLE":JobTaskCapture.ValidateMovement(plan,
+                JobsManager.Instance.currentJobs.Concat(JobCars(JobsManager.Instance)?.Keys.AsEnumerable()??Enumerable.Empty<Job>()),
+                ReadTask, leg=>JobRouteRules.ShuntingConsistError(leg,LiveShuntingCars(),plan.trainCar??plan.train));
+        private IEnumerable<CarState> LiveShuntingCars()
+        {
+            // A preview can outlive a coupling edit. Read the real couplers on
+            // Unity's thread again before any native route is registered.
+            foreach(var entry in carList) {
+                var car=entry.car;if(car==null)continue;
+                yield return new CarState {
+                    id=entry.id, consist=car.trainset==null?"car:"+entry.id:"train:"+car.trainset.id,
+                    nativeTrainset=car.trainset!=null, availability="available",
+                    locomotive=car.IsLoco, vehicleCategory=VehiclePresentation.Category(car.carLivery),
+                    couplersKnown=car.frontCoupler!=null&&car.rearCoupler!=null,
+                    coupledFront=car.frontCoupler?.GetCoupled()?.train?.CarGUID,
+                    coupledRear=car.rearCoupler?.GetCoupled()?.train?.CarGUID,
+                    track1=TrackId(car.FrontBogie?.track),track2=TrackId(car.RearBogie?.track),
+                    derailed=car.FrontBogie?.HasDerailed==true||car.RearBogie?.HasDerailed==true
+                };
+            }
+        }
+        private bool RouteTaskCompleted(RoutePlan plan) => !string.IsNullOrEmpty(plan.jobId) && !plan.passengerRoute && JobsManager.Instance!=null &&
+            JobTaskCapture.MovementCompleted(plan,JobsManager.Instance.currentJobs.Concat(JobsManager.Instance.finishedJobs));
         [HarmonyPatch(typeof(JobsManager), nameof(JobsManager.RegisterGeneratedJob))]
         private static class JobRegistered { private static void Postfix() => Main.Runtime?.RequestJobs(); }
         [HarmonyPatch(typeof(JobsManager), nameof(JobsManager.UnregisterJob))]

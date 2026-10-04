@@ -57,7 +57,7 @@ namespace AdvancedDispatcherSystem.Passenger
                     if (state.licenses[i] == license.v1.ToString()) state.licenses[i] = license.id;
             }
         }
-        public void EnrichTask(TaskData task, JobLeg leg)
+        public void EnrichTask(Task nativeTask, TaskData task, JobLeg leg)
         {
             if (task is RuralTaskData rural)
             {
@@ -65,7 +65,9 @@ namespace AdvancedDispatcherSystem.Passenger
                 leg.to = rural.stationId;
                 leg.type = rural.isLoading ? "PassengerBoarding" : "PassengerAlighting";
             }
-            else if (task.type == CityLoadingTask.TaskType)
+            // CityLoadingTask inherits WarehouseTask.GetTaskData(), which exports
+            // TaskType.Warehouse. Its native runtime type must survive capture.
+            else if (nativeTask is CityLoadingTask)
             {
                 leg.station = task.destinationTrack?.ID?.yardId;
                 leg.type = task.warehouseTaskType == WarehouseTaskType.Loading ? "PassengerBoarding" :
@@ -73,6 +75,7 @@ namespace AdvancedDispatcherSystem.Passenger
             }
             else return;
             leg.source = "Passenger Jobs";
+            leg.passengerStop = true;
         }
         public StationDef[] CaptureLocations(Func<RailTrack, string> trackId)
         {
@@ -91,27 +94,34 @@ namespace AdvancedDispatcherSystem.Passenger
                 bool city = station is PassStationData;
                 if (city && ((PassStationData)station).Controller == null || station is RuralStationData r && r.Controller == null) continue;
                 var pos = station.GetLocation() - WorldMover.currentMove;
-                var tracks = station.GetPlatforms().Select(p => trackId(p.Track.RailTrack())).Where(id => id != null).Distinct().ToArray();
+                var platformRows = station.GetPlatforms().Select(p => new { platform = p, id = p.Track == null ? null : trackId(p.Track.RailTrack()) }).Where(x => x.id != null).GroupBy(x => x.id, StringComparer.Ordinal).Select(g => g.First()).ToArray();
+                var tracks = platformRows.Select(x => x.id).Distinct().ToArray();
                 if (tracks.Length == 0) continue; // A configured but unbuilt platform isn't a live stop.
                 // RuralStationData also represents single platforms INSIDE native yards.
                 // Match the same real station lookup used by Passenger Jobs RuralStationBuilder.
                 var native = StationController.GetStationByYardID(station.YardID);
                 var name = native != null ? DisplayText.Station(native) : LocalizationKeyExtensions.StationName(station.YardID);
                 if (!DisplayText.Usable(name)) name = null;
+                var nameKey = native != null ? native.stationInfo.LocalizationKey :
+                    LocalizationKeyExtensions.STATION_NAME_KEY + station.YardID.ToLowerInvariant();
+                var nameEn = DisplayText.Translation(nameKey, "English");
+                var nameRu = DisplayText.Translation(nameKey, "Russian");
                 var platformCode = !city && native != null ? station.GetPlatforms().Select(p => p.PlatformID).FirstOrDefault() : null;
                 var platformLabel = !city && native != null ? station.GetPlatforms().Select(p => p.Track?.ID?.TrackPartOnly).FirstOrDefault() : null;
+                var nativeRows = platformRows.Select(x => new StationTrackDef { id = x.id, name = x.platform.Track?.ID?.TrackPartOnly, fullName = x.platform.Track?.ID?.FullDisplayID, group = x.platform.Track?.ID?.SignIDSubYardPart, direction = 0 }).ToArray();
                 result.Add(new StationDef { id = city ? station.YardID : "pj:" + station.YardID, parent = station.YardID,
-                    name = name, code = station.YardID, platform = platformCode, platformLabel = platformLabel, type = city ? "passengerCity" : native != null ? "passengerPlatform" : "passengerRural", source = "Passenger Jobs",
+                    name = name, nameEn = nameEn, nameRu = nameRu, code = station.YardID, platform = platformCode, platformLabel = platformLabel, trackGroup = !city && native != null ? station.GetPlatforms().Select(p=>p.Track?.ID?.SignIDSubYardPart).FirstOrDefault() : null, type = city ? "passengerCity" : native != null ? "passengerPlatform" : "passengerRural", source = "Passenger Jobs",
                     color = native != null ? "#" + ColorUtility.ToHtmlStringRGB(native.stationInfo.StationColor) : localColor,
-                    passenger = true, x = pos.x, z = pos.z, tracks = tracks });
+                    passenger = true, x = pos.x, z = pos.z, tracks = tracks, stationTracks = nativeRows });
                 if (city) foreach (var platform in station.GetPlatforms()) {
+                    if (platform.Track == null) continue;
                     var rail = platform.Track.RailTrack(); var id = trackId(rail); if (id == null) continue;
                     var set = rail.GetKinkedPointSet(); if (set == null || set.points.Length == 0) continue;
                     var point = set.points[set.points.Length / 2].position;
                     result.Add(new StationDef { id = "pj:platform:" + platform.PlatformID, parent = station.YardID,
-                        name = name, code = station.YardID, platform = platform.PlatformID, platformLabel = platform.Track?.ID?.TrackPartOnly, type = "passengerPlatform", source = "Passenger Jobs",
+                        name = name, nameEn = nameEn, nameRu = nameRu, code = station.YardID, platform = platform.PlatformID, platformLabel = platform.Track?.ID?.TrackPartOnly, trackGroup=platform.Track?.ID?.SignIDSubYardPart, type = "passengerPlatform", source = "Passenger Jobs",
                         color = native != null ? "#" + ColorUtility.ToHtmlStringRGB(native.stationInfo.StationColor) : localColor,
-                        passenger = true, x = point.x, z = point.z, tracks = new[] { id } });
+                        passenger = true, x = point.x, z = point.z, tracks = new[] { id }, stationTracks = new[] { new StationTrackDef { id = id, name = platform.Track?.ID?.TrackPartOnly, fullName = platform.Track?.ID?.FullDisplayID, group = platform.Track?.ID?.SignIDSubYardPart, direction = 0 } } });
                 }
             }
             Status = result.Count > 0 ? "ready" : "loading";

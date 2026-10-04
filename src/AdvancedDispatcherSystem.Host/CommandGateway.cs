@@ -13,7 +13,7 @@ public sealed class CommandGateway
     private readonly RateGate rate = new();
     private readonly SemaphoreSlim execution = new(1, 1);
     private int waiting;
-    private readonly HashSet<string> allowed = new(StringComparer.Ordinal) { "setSwitch", "setTurntable", "loco", "setSignalMode", "setSignalAspect", "setShunting", "reserveSignal", "cancelSignalReservation", "planRoute", "cancelRoute", "applyRoute", "reserveRouteSignals", "releaseRouteSignals", "reserveRoute", "releaseRoute", "completeRoute", "rescan" };
+    private readonly HashSet<string> allowed = new(StringComparer.Ordinal) { "acceptJob", "cancelJob", "assignJob", "unassignJob", "assignRoute", "unassignRoute", "setSwitch", "setTurntable", "loco", "setSignalMode", "setSignalAspect", "setShunting", "reserveSignal", "cancelSignalReservation", "planRoute", "editRoutePoints", "cancelRoute", "applyRoute", "recalculateRoute", "cancelRouteEdit", "confirmRouteEdit", "advanceRouteStage", "reserveRouteSignals", "releaseRouteSignals", "reserveRoute", "releaseRoute", "completeRoute", "rescan" };
     public CommandGateway(StateHub hub, GameConnection game) : this(hub, game.Execute) { }
     public CommandGateway(StateHub hub, Func<Command,Task<CommandResult>> executeGame) { this.hub=hub;this.executeGame=executeGame; }
     public Task<CommandResult> Run(Command c, AuthSession user)
@@ -23,6 +23,8 @@ public sealed class CommandGateway
         if (user == null || (user.role != "dispatcher" && user.role != "admin") || (c.kind == "rescan" || c.kind == "loco") && user.role != "admin") return Task.FromResult(Reject("FORBIDDEN"));
         if (!rate.Allow((c.kind=="cancelRoute"?"cancel:":"command:")+user.name, c.kind=="cancelRoute"?10:30, 1000)) return Task.FromResult(Reject("RATE_LIMITED"));
         c.actor = user.name; c.role = user.role; c.deadline = 0; c.route=null;c.routeId=null;
+        if(new[]{c.target,c.action,c.jobId,c.taskId,c.from,c.to,c.train,c.routeEditId}.Any(id=>id!=null&&(id.Length>256||id.Any(char.IsControl))))return Task.FromResult(Reject("INVALID_COMMAND"));
+        if((c.kind=="planRoute"||c.kind=="editRoutePoints")&&(c.via==null||c.via.Length>128||c.via.Any(id=>string.IsNullOrEmpty(id)||id.Length>256||id.Any(char.IsControl))))return Task.FromResult(Reject("INVALID_COMMAND"));
         if(c.reservationMode!=null && c.reservationMode!="none" && c.reservationMode!="normal" && c.reservationMode!="protected")return Task.FromResult(Reject("INVALID_RESERVATION"));
         string key = user.name + ":" + c.id;
         byte[] digest = SHA256.HashData(Json.Bytes(c));
@@ -46,6 +48,7 @@ public sealed class CommandGateway
     private async Task<CommandResult> CancelImmediately(Command c,AuthSession user)
     {
         try { return user.expires!=0&&user.expires<Environment.TickCount64?new CommandResult {id=c.id,status="rejected",code="FORBIDDEN"}:await Execute(c,user); }
+        catch (RouteSearchLimitException) { return new CommandResult {id=c.id,target=c.target,status="rejected",code="ROUTE_SEARCH_LIMIT"}; }
         finally { Interlocked.Decrement(ref waiting); }
     }
     private async Task<CommandResult> ExecuteSerial(Command c, AuthSession user)
@@ -54,7 +57,8 @@ public sealed class CommandGateway
             if (!await execution.WaitAsync(TimeSpan.FromSeconds(8))) return new CommandResult { id = c.id, status = "rejected", code = "QUEUE_FULL" };
             try {
                 var error = user.expires != 0 && user.expires < Environment.TickCount64 ? "FORBIDDEN" : hub.Validate(c);
-                return error == null ? await Execute(c, user) : new CommandResult { id = c.id, status = "rejected", code = error };
+                try {return error == null ? await Execute(c, user) : new CommandResult { id = c.id, status = "rejected", code = error };}
+                catch(RouteSearchLimitException) {return new CommandResult{id=c.id,target=c.target,status="rejected",code="ROUTE_SEARCH_LIMIT"};}
             }
             finally { execution.Release(); }
         }
@@ -63,10 +67,46 @@ public sealed class CommandGateway
     private async Task<CommandResult> Execute(Command c, AuthSession user)
     {
         CommandResult result;
-        if(c.kind=="planRoute")
+        if(c.kind=="assignJob"||c.kind=="unassignJob") {var error=hub.AssignJob(c.target,c.action,c.kind=="unassignJob");result=new CommandResult{target=c.target,status=error==null?"applied":"rejected",code=error};}
+        else if(c.kind=="assignRoute"||c.kind=="unassignRoute") {var error=hub.AssignRoute(c.target,c.action,c.kind=="unassignRoute");result=new CommandResult{target=c.target,status=error==null?"applied":"rejected",code=error,route=hub.Route(c.target)};}
+        else if(c.kind=="planRoute")
         {
-            var plan=hub.Plan(c.from,c.to,c.actor,c.train,preparing:true,via:c.via);
-            result=plan==null?new CommandResult {status="rejected",code=hub.RouteFailure(c.from,c.to,c.train,c.via)}:await PrepareRoute(plan.id,c.reservationMode??"none",c,user);
+            var plan=await hub.PlanAsync(c.from,c.to,c.actor,c.train,preparing:true,via:c.via,jobId:c.jobId,taskIndex:c.taskIndex,taskId:c.taskId,avoidReservations:c.avoidReservations);
+            result=plan==null?new CommandResult {status="rejected",code=hub.JobRouteError(c.jobId,c.taskIndex,c.taskId,c.from,c.to,c.via,train:c.train)??hub.RouteFailure(c.from,c.to,c.train,c.via)}:await PrepareRoute(plan.id,c.reservationMode??"none",c,user);
+        }
+        else if(c.kind=="recalculateRoute" || c.kind=="cancelRouteEdit" || c.kind=="editRoutePoints")
+        {
+            bool ok=c.kind=="cancelRouteEdit" ? hub.CancelRouteEdit(c.target,c.routeEditId) : hub.CreateRouteEditPreview(c.target,null,manual:true,requestedVia:c.kind=="editRoutePoints"?c.via:null);
+            var route=hub.Route(c.target);
+            result=new CommandResult {status=ok?"applied":"rejected",target=c.target,route=route,code=ok?null:route==null?"NOT_FOUND":route.reason??"ROUTE_RECALCULATION_STALE"};
+        }
+        else if(c.kind=="advanceRouteStage")
+        {
+            var next = hub.PrepareNextStage(c.target, c.reservationMode);
+            result = next == null
+                ? new CommandResult { status="rejected", target=c.target, code="STAGED_NEXT_LEG_UNAVAILABLE" }
+                : await PrepareRoute(next.id, next.reservationMode, c, user);
+        }
+        else if(c.kind=="confirmRouteEdit")
+        {
+            var request = hub.RouteReplacementCommand(c.target, c.actor, c.routeEditId);
+            if (request == null) result = new CommandResult { status="rejected", code="ROUTE_RECALCULATION_STALE", target=c.target };
+            else
+            {
+                CommandResult applied;
+                try { applied=await executeGame(request); }
+                catch(Exception e) { Console.Error.WriteLine("ROUTE_EDIT_FAILED "+e.GetType().Name); applied=new CommandResult {status="outcomeUnknown",code="COMMAND_FAILED"}; }
+                hub.Receipt(request, applied);
+                var observed=hub.Route(c.target);
+                bool confirmedByState=observed?.recalculationState=="none" && observed.editVersion==request.route.editVersion;
+                if (applied.status == "applied" || confirmedByState)
+                {
+                    result = hub.CommitRouteEdit(c.target, applied.route ?? request.route)
+                        ? new CommandResult { status="applied", target=c.target, route=hub.Route(c.target) }
+                        : new CommandResult {status="outcomeUnknown",target=c.target,code="ROUTE_RECALCULATION_FAILED"};
+                }
+                else { hub.FailRouteEdit(c.target, applied.code ?? "ROUTE_RECALCULATION_FAILED",applied.status=="outcomeUnknown"); result = applied; }
+            }
         }
         else if(c.kind=="applyRoute" || c.kind=="reserveRoute" || c.kind=="reserveRouteSignals")
             result=await PrepareRoute(c.target,c.kind=="applyRoute"?"none":c.reservationMode??"normal",c,user);
@@ -74,6 +114,7 @@ public sealed class CommandGateway
         {
             var route=hub.Route(c.target);
             if(route==null)result=new CommandResult {status="rejected",code="NOT_FOUND"};
+            else if(route.recalculationState=="recalculating"||route.recalculationState=="replacing") result=new CommandResult {status="rejected",code="ROUTE_RECALCULATING",target=c.target};
             else
             {
                 bool end=c.kind=="cancelRoute"||c.kind=="completeRoute";
@@ -107,8 +148,8 @@ public sealed class CommandGateway
         }
         try {
         if(mode=="protected"&&!hub.Capabilities.protectedReservations)return await Fail("PROTECTION_UNAVAILABLE");
-        hub.RouteOperation(id,"preparing");
-        string blocker=hub.RouteBlocker(id,mode!="none",mode=="none");if(blocker!=null)return await Fail(blocker);
+        hub.RouteOperation(id,"preparing",mode:mode);
+        string blocker=hub.RouteBlocker(id,mode!="none",mode=="none",request.forceReservation);if(blocker!=null)return await Fail(blocker);
         long deadline=Protocol.Now+180000;
         var attempted=new HashSet<string>();
         while(true)
@@ -118,7 +159,7 @@ public sealed class CommandGateway
             if(next.Commands.Length==0)break;
             var step=next.Commands[0];
             if(!attempted.Add(step.target)||attempted.Count>1024)return await Fail("ROUTE_PARTIAL");
-            string error=Protocol.Now>deadline?"COMMAND_EXPIRED":user.expires!=0&&user.expires<Environment.TickCount64?"FORBIDDEN":hub.RouteBlocker(id,false,mode=="none")??hub.Validate(step);
+            string error=Protocol.Now>deadline?"COMMAND_EXPIRED":user.expires!=0&&user.expires<Environment.TickCount64?"FORBIDDEN":hub.RouteBlocker(id,false,mode=="none",request.forceReservation)??hub.Validate(step);
             if(error!=null)return await Fail(error);
             var receipt=await executeGame(step);hub.Receipt(step,receipt);
             if(receipt.status!="applied")return await Fail(receipt.code??"ROUTE_PARTIAL",receipt.status=="outcomeUnknown"?"outcomeUnknown":"rejected");
@@ -128,7 +169,7 @@ public sealed class CommandGateway
         // connected turntable mouths before acknowledging the complete operation.
         var registration=hub.RouteRegistration(id,request.actor,mode);
         if(registration==null)return await Fail("NOT_FOUND");
-        string finalError=user.expires!=0&&user.expires<Environment.TickCount64?"FORBIDDEN":hub.RouteBlocker(id,false,mode=="none")??hub.Validate(registration);
+        string finalError=user.expires!=0&&user.expires<Environment.TickCount64?"FORBIDDEN":hub.RouteBlocker(id,false,mode=="none",request.forceReservation)??hub.Validate(registration);
         if(finalError!=null)return await Fail(finalError);
         var existing=hub.Route(id);
         if(mode=="none"&&existing?.reservationState=="reserved")

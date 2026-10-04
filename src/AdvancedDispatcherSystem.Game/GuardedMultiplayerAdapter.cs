@@ -5,7 +5,7 @@ namespace AdvancedDispatcherSystem.Game
 {
     // Optional provider failures must revoke authority, including failures in
     // getters used before the ordinary capture try/catch.
-    internal sealed class GuardedMultiplayerAdapter : IMultiplayerAdapter
+    internal sealed class GuardedMultiplayerAdapter : IMultiplayerAdapter, IHostSettingsProvider
     {
         private readonly IMultiplayerAdapter source;
         private readonly Action<Exception> failed;
@@ -24,6 +24,8 @@ namespace AdvancedDispatcherSystem.Game
         public bool ProtectedSwitches => Read(() => source.ProtectedSwitches, false);
         public bool PublishSignalReservation(int signal, bool reserved) => Read(() => source.PublishSignalReservation(signal, reserved), false);
         public PlayerState[] CapturePlayers() => Read(() => source.CapturePlayers(), Array.Empty<PlayerState>());
+        public HostSettingsState CurrentHostSettings => Read(() => (source as IHostSettingsProvider)?.CurrentHostSettings, (HostSettingsState)null);
+        public void UpdateHostSettings(HostSettingsState settings) => Read(() => { (source as IHostSettingsProvider)?.UpdateHostSettings(settings); return true; }, false);
         public void Dispose() { if (disposed) return; disposed = true; source.Dispose(); }
     }
 }

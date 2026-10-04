@@ -1,5 +1,8 @@
+import { browserSettingKeys } from "./settings-registry.js";
+
 const failures = new Set();
 let reported = false;
+let resetting = false;
 function access(operation, key, action, fallback) {
   const id = operation + ":" + key;
   try {
@@ -18,6 +21,7 @@ function access(operation, key, action, fallback) {
 export const readSetting = (key) =>
   access("read", key, () => localStorage.getItem(key), null);
 export const saveSetting = (key, value) =>
+  resetting && browserSettingKeys.includes(key) ? false :
   access(
     "write",
     key,
@@ -38,3 +42,14 @@ export const removeSetting = (key) =>
     false,
   );
 export const settingsVolatile = () => failures.size > 0;
+export function resetStoredBrowserSettings() {
+  let success = true;
+  for (const key of browserSettingKeys) if (!removeSetting(key)) success = false;
+  // pagehide saves the current camera. Prevent old runtime values from
+  // restoring cleared preferences while the requested reload is in progress.
+  resetting = success;
+  return success;
+}
+export function cancelBrowserSettingsReset() {
+  resetting = false;
+}

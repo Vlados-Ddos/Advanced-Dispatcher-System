@@ -22,8 +22,8 @@ namespace AdvancedDispatcherSystem.Signals
             if (signal.Controller is BufferStopSignalController || signal.Controller is TurntableSignalController) return true;
             var owner = signal;
             while (owner.Parent != null) owner = owner.Parent;
-            if (Array.IndexOf(signal.Controller.DisplaySignals, owner) >= 0) return true;
-            if (signal.AllAspects.Length == 0) return true;
+            if (signal.Controller.DisplaySignals != null && Array.IndexOf(signal.Controller.DisplaySignals, owner) >= 0) return true;
+            if (signal.AllAspects == null || signal.AllAspects.Length == 0) return true;
             // A permanently displayed board has neither a variable aspect nor a lamp/animation.
             return signal.AllAspects.Length == 1 && signal.AllAspects[0].GetDefinition() is AlwaysActiveAspectDefinition &&
                 (signal.AllLights == null || signal.AllLights.Length == 0) && signal.Definition.Animator == null;

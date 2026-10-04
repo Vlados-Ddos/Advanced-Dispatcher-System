@@ -1,8 +1,9 @@
+import { signalAnimation } from "./signal-animation.js";
 import { aboveLod } from "./lod.js";
 import { SignalTooltip } from "./signal-tooltip.js";
 import { objectFocus } from "./object-focus.js";
 import { PlacementQueue } from "./placement-queue.js";
-import { beginFocus, advanceFocus, clampZoom } from "./camera.js";
+import { beginFocus, advanceFocus, clampZoom, centreOnTarget } from "./camera.js";
 import { mapPalette, offsetPolyline } from "./map-palette.js";
 import { bindMapInput } from "./map-input.js";
 import { signalLod } from "./signal-lod.js";
@@ -17,7 +18,7 @@ import { drawSignalHead, drawSignalConnector } from "./signal-geometry.js";
 import { carDisplayColor, normalizeColorMode } from "./job-display.js";
 import { readLayers } from "./layers.js";
 import { drawTurntables } from "./turntables.js";
-import { drawRoute, routeBounds, routeHit } from "./route-display.js";
+import { drawRoute, drawRouteEditPreview, routeBounds, routeHit, activeRouteTracks } from "./route-display.js";
 import {
   signalLayout,
   advanceSignalLayouts,
@@ -82,6 +83,18 @@ class SpatialIndex {
 }
 
 export class Renderer extends EventTarget {
+  get follow() {return this._follow ?? null;}
+  set follow(value) {
+    if(this._follow===value)return;
+    this._follow=value;
+    this.dispatchEvent(new Event("tracking"));
+  }
+  get cameraFocus() {return this._cameraFocus ?? null;}
+  set cameraFocus(value) {
+    if(this._cameraFocus===value)return;
+    this._cameraFocus=value;
+    this.dispatchEvent(new Event("tracking"));
+  }
   constructor(store) {
     super();
     this.layoutOwner = this;
@@ -202,6 +215,7 @@ export class Renderer extends EventTarget {
       this.cx = saved.cx;
       this.cz = saved.cz;
       this.scale = clampZoom(saved.scale);
+      this.fitPending = false;
       this.invalidate();
     } catch {
       /* Invalid or unavailable storage leaves the fitted native network. */
@@ -254,6 +268,7 @@ export class Renderer extends EventTarget {
       if (c.style.height !== height + "px") c.style.height = height + "px";
     }
     if (!this.colors) this.theme();
+    if (this.fitPending) this.fit();
     if (this.focusRouteId) this.fitRoute();
     this.invalidate();
     // Resizing the backing buffer clears it immediately. Repaint before the
@@ -326,12 +341,20 @@ export class Renderer extends EventTarget {
         this.infrastructureChanges.add(s.id);
       for (const id of payload.removedSignals || [])
         this.infrastructureChanges.add(id);
+      // Board footprints extend beyond lamp-head damage rectangles, and
+      // standalone boards do not have a lamp-head rectangle at all.
+      if (this.layers.additionalSigns) this.infrastructureDirty = true;
     }
     if (
       payload?.switches?.length ||
       payload?.signs?.length ||
       payload?.replaceSigns ||
-      payload?.turntables?.length
+      payload?.turntables?.length ||
+      payload?.locations?.length ||
+      payload?.replaceLocations ||
+      payload?.reset ||
+      (this.layers.blockLabels &&
+        (payload?.blocks?.length || payload?.removedBlocks?.length))
     )
       this.infrastructureDirty = true;
     for (const id of payload?.removedSignals || []) {
@@ -468,9 +491,11 @@ export class Renderer extends EventTarget {
           const v = this.blockVisual.get(id) || {
             occupied: false,
             reserved: false,
+            protection: false,
           };
           v.occupied ||= b.occupied;
           v.reserved ||= b.reserved;
+          v.protection ||= (b.extraTracks || []).includes(id);
           this.blockVisual.set(id, v);
         }
   }
@@ -525,6 +550,11 @@ export class Renderer extends EventTarget {
   fit() {
     this.cameraFocus = null;
     if (!this.paths.size) return;
+    // Topology may arrive before ResizeObserver's first callback, or while
+    // the map is hidden. Use its real viewport; retry on becoming visible.
+    this.fitPending = this.root.clientWidth <= 0 || this.root.clientHeight <= 0;
+    if (this.fitPending) return;
+    this.resize();
     let box = [Infinity, Infinity, -Infinity, -Infinity];
     for (const p of this.paths.values()) {
       box[0] = Math.min(box[0], p.box[0]);
@@ -534,10 +564,10 @@ export class Renderer extends EventTarget {
     }
     this.cx = (box[0] + box[2]) / 2;
     this.cz = (box[1] + box[3]) / 2;
-    this.scale = Math.min(
-      (this.width - 100) / Math.max(1, box[2] - box[0]),
-      (this.height - 100) / Math.max(1, box[3] - box[1]),
-    );
+    this.scale = clampZoom(Math.min(
+      Math.max(1, this.width - 100) / Math.max(1, box[2] - box[0]),
+      Math.max(1, this.height - 100) / Math.max(1, box[3] - box[1]),
+    ));
     this.follow = null;
     this.invalidate();
   }
@@ -550,10 +580,23 @@ export class Renderer extends EventTarget {
     this.invalidate();
   }
   zoom(factor, x = this.width / 2, y = this.height / 2) {
-    this.follow = null;
-    // Selection starts an explicit focus transition. Wheel zoom owns its own
-    // cursor anchor and must never complete that transition by teleporting.
+    const followed = this.follow || (["cars","trains","wagonGroups","players"].includes(this.cameraFocus?.item?.kind)?this.cameraFocus.item:null);
+    // Static focus yields to pointer zoom. A moving follow transition retains
+    // its target, including a wheel gesture in the first animation frame.
     this.cameraFocus = null;
+    if (followed) {
+      this.follow=followed;
+      const target = this.focusPosition(followed);
+      this.scale = clampZoom(this.scale * factor);
+      if (target && Number.isFinite(target.x) && Number.isFinite(target.z)) {
+        // Follow mode has an object anchor, not a pointer anchor.  Keep the
+        // followed object at the viewport centre for wheel, keyboard and
+        // touch zoom; a manual pan explicitly clears follow in map-input.
+        centreOnTarget(this,target);
+      } else this.follow = null;
+      this.invalidate();
+      return;
+    }
     const before = this.world(x, y);
     this.scale = clampZoom(this.scale * factor);
     const after = this.world(x, y);
@@ -703,8 +746,11 @@ export class Renderer extends EventTarget {
     this.unbindInput = bindMapInput(this);
   }
   hit(x, y, options = {}) {
-    if (options.tracksOnly || (this.trackPicking && !options.hover))
-      return this.hitTrack(x, y);
+    // Track picking is the fallback for an empty point. An explicit Alt-click
+    // still requests the rail beneath an object; ordinary clicks must first
+    // inspect rolling stock and infrastructure so planner mode cannot make a
+    // wagon/locomotive look like a track merely because START is selected.
+    if (options.tracksOnly) return this.hitTrack(x, y);
     if (this.focusRouteId) {
       if (this.layers.turntables)
         for (const table of this.store.tableDefs.values()) {
@@ -776,13 +822,9 @@ export class Renderer extends EventTarget {
       )
         for (const signal of this.store.signals.values())
           if (signalVisible(signal, this.layers)) {
-            const p = this.project(signal.x, signal.z);
-            const reach =
-              (512 *
-                Math.max(preferences.signalScale, preferences.indicatorScale)) /
-              100;
-            if (Math.abs(p[0] - x) > reach || Math.abs(p[1] - y) > reach)
-              continue;
+            // Placement offsets are world anchored and grow with zoom. A
+            // fixed 512px gate around the native object rejected visible heads
+            // before the exact shared drawing/selection geometry was tested.
             const shape = signalLayout(this, signal);
             if (
               signalLod(this, signal).opacity * (shape.crowdingOpacity ?? 1) >=
@@ -964,7 +1006,7 @@ export class Renderer extends EventTarget {
     if (this.focusRouteId) {
       const route = this.store.routes.find((r) => r.id === this.focusRouteId);
       drawTurntables(this, ctx);
-      if (route) drawRoute(this, ctx, route, true);
+      if (route) { drawRoute(this, ctx, route, true); drawRouteEditPreview(this, ctx, route); }
       this.drawInfrastructure();
       ctx.restore();
       return;
@@ -977,8 +1019,15 @@ export class Renderer extends EventTarget {
           reserved = b.reserved && this.layers.reservations;
         if (!occupied && !reserved) continue;
         if (reserved) {
-          ctx.setLineDash([4, 4]);
-          this.strokeTrack(ctx, id, mapPalette.reservation, 7);
+          ctx.setLineDash(b.protection ? [2, 4] : [4, 4]);
+          this.strokeTrack(
+            ctx,
+            id,
+            b.protection
+              ? mapPalette.protectionFootprint
+              : mapPalette.reservation,
+            b.protection ? 5 : 7,
+          );
         }
         if (occupied) {
           ctx.setLineDash([]);
@@ -1006,7 +1055,7 @@ export class Renderer extends EventTarget {
       ctx.setLineDash([6, 3]);
       for (const route of this.store.routes)
         if (!route.endedAt && route.reservationState === "reserved")
-          for (const id of route.tracks)
+          for (const id of activeRouteTracks(route))
             this.strokeTrack(
               ctx,
               id,
@@ -1034,9 +1083,12 @@ export class Renderer extends EventTarget {
         ...this.store.routes.filter((r) => !r.endedAt),
         ...(this.store.preview ? [this.store.preview] : []),
       ])
-        for (const id of route.tracks)
+        for (const id of activeRouteTracks(route))
           this.strokeTrack(ctx, id, mapPalette.route, 2.2);
       ctx.setLineDash([]);
+      for (const route of this.store.routes)
+        if (!route.endedAt && route.editPreview)
+          drawRouteEditPreview(this, ctx, route);
     }
     if (this.layers.switches || this.layers.switchBranches)
       for (const j of this.store.junctions.values())
@@ -1134,36 +1186,17 @@ export class Renderer extends EventTarget {
         if (partial) {
           const old = this.signalPaintBounds.get(s.id);
           if (old && !dirty.some((b) => overlaps(old, b))) continue;
-          const [px, py] = this.project(s.x, s.z);
-          if (
-            !old &&
-            !dirty.some((b) =>
-              overlaps([px - 512, py - 512, px + 512, py + 512], b),
-            )
-          )
-            continue;
         }
         const [x, y] = this.project(s.x, s.z);
-        const margin =
-          (512 *
-            Math.max(preferences.signalScale, preferences.indicatorScale)) /
-          100;
-        if (
-          x < -margin ||
-          y < -margin ||
-          x > this.width + margin ||
-          y > this.height + margin
-        )
-          continue;
         const shape = signalLayout(this, s);
         const sx = x + (shape.offsetX || 0),
           sy = y + (shape.offsetY || 0);
         const bounds = signalFootprint(shape);
         if (
-          sx + bounds.w / 2 + 14 < 0 ||
-          sy + bounds.h / 2 + 14 < 0 ||
-          sx - bounds.w / 2 - 14 > this.width ||
-          sy - bounds.h / 2 - 14 > this.height
+          sx + bounds.cx + bounds.w / 2 + 14 < 0 ||
+          sy + bounds.cy + bounds.h / 2 + 14 < 0 ||
+          sx + bounds.cx - bounds.w / 2 - 14 > this.width ||
+          sy + bounds.cy - bounds.h / 2 - 14 > this.height
         )
           continue;
         const box = signalBox(s, shape);
@@ -1387,29 +1420,18 @@ export class Renderer extends EventTarget {
       return;
     const start = performance.now();
     this.lastFrame = now;
+    signalAnimation(this,now);
     advanceSignalLayouts(this);
     this.placementMs = performance.now() - start;
-    if (this.hoverDirty && this.pointer && !this.panning) {
-      this.hoverDirty = false;
-      const item = this.hit(...this.pointer, { hover: true });
-      const method = item ? "add" : "remove";
-      if (preferences.signalTooltip) this.tooltip.update(item, this.pointer);
-      this.root.classList[method]("interactive");
-    }
     this.frameTime = this.store.presentationTime(now);
     advanceFocus(this, now);
     if (this.follow) {
       const p = this.resolve(this.follow);
       if (p) {
         const sample = this.focusPosition(this.follow) || p;
-        if (
-          Math.abs(sample.x - this.cx) + Math.abs(sample.z - this.cz) >
-          0.02
-        ) {
-          this.cx = sample.x;
-          this.cz = sample.z;
-          this.invalidate();
-        }
+        const beforeX=this.cx,beforeZ=this.cz;
+        centreOnTarget(this,sample);
+        if(Math.abs(beforeX-this.cx)+Math.abs(beforeZ-this.cz)>0.02)this.invalidate();
       } else this.follow = null;
     }
     const stale = this.store.stale;
@@ -1417,6 +1439,7 @@ export class Renderer extends EventTarget {
       this.wasStale = stale;
       this.hoverDirty = true;
       this.overlayDirty = true;
+      this.infrastructureDirty = true;
       this.interactionDirty = true;
     }
     if (this.staticDirty) {
@@ -1453,6 +1476,13 @@ export class Renderer extends EventTarget {
     ) {
       this.drawInteraction();
       this.interactionDirty = false;
+    }
+    if (this.hoverDirty && this.pointer && !this.panning) {
+      this.hoverDirty = false;
+      const item = this.hit(...this.pointer, { hover: true });
+      const method = item ? "add" : "remove";
+      if (preferences.signalTooltip) this.tooltip.update(item, this.pointer);
+      this.root.classList[method]("interactive");
     }
     this.frameWorkMs = performance.now() - start;
     this.maxFrameWorkMs = Math.max(this.maxFrameWorkMs || 0, this.frameWorkMs);

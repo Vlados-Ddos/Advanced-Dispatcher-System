@@ -1,3 +1,4 @@
+import { lampLit } from "./signal-animation.js";
 import { signalLod, indicatorLod } from "./signal-lod.js";
 import { drawMechanical } from "./mechanical-signals.js";
 import { drawSignalParts } from "./signal-composite.js";
@@ -205,15 +206,7 @@ export function drawSignalHead(renderer, ctx, signal, shape, connector = true) {
     for (const lamp of [...shape.lamps].sort(
       (a, b) => Number(a.on) - Number(b.on),
     )) {
-      // phaseOn is captured from LampControl.IsOn, before emission easing.
-      // Legacy packets use measured emission without inventing a clock.
-      const lit =
-        lamp.on &&
-        (lamp.phaseKnown
-          ? lamp.phaseOn
-          : lamp.brightnessKnown
-            ? lamp.brightness >= 0.5
-            : !lamp.blinking);
+      const lit=lampLit(lamp,renderer.signalTime);
       ctx.fillStyle = lit ? lamp.color : "#1c2023";
       ctx.beginPath();
       ctx.arc(lamp.x, lamp.y, shape.radius, 0, Math.PI * 2);

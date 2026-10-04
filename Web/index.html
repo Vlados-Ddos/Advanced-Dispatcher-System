@@ -20,6 +20,7 @@
         ><i></i><span data-i18n="connecting">Connecting</span></span
       >
       <div class="top-actions">
+        <button id="connection-retry" type="button" data-i18n="retryConnection" hidden>Retry connection</button>
         <span id="account-name"></span
         ><button id="logout" class="subtle" data-i18n="logout">Sign out</button>
       </div>
@@ -92,13 +93,13 @@
         <div class="sidebar-footer">
           <span class="advisory-dot"></span
           ><span data-i18n="advisoryShort">Advisory dispatch</span
-          ><small>v0.7.15</small>
+          ><small>v1.0.1</small>
         </div>
       </aside>
       <section class="map-panel" aria-label="Railway map" data-aria="mapTitle">
         <div class="map-toolbar">
           <button id="fit" data-i18n="fit">Fit network</button
-          ><button id="home-player" data-i18n="playerHome">To players</button
+          ><button id="home-player" data-i18n="playerHome">Show players</button
           ><button id="follow" data-i18n="follow">Follow</button>
           <div class="toolbar-spacer"></div>
 
@@ -157,6 +158,9 @@
               ><i class="reservation"></i
               ><b data-i18n="reservedLegend">Reserved</b></span
             ><span
+              ><i class="protection"></i
+              ><b data-i18n="protectionLegend">Signal block protection</b></span
+            ><span
               ><i class="selected-object"></i
               ><b data-i18n="selectedLegend">Selected object</b></span
             ></span
@@ -164,6 +168,9 @@
         </div>
       </section>
       <div id="inspector-frame" class="inspector-frame">
+        <button id="mobile-sheet-toggle" class="mobile-sheet-toggle" type="button" aria-label="Collapse details" data-i18n-aria="toggleDetails">
+          <span aria-hidden="true"></span>
+        </button>
         <aside
           id="inspector"
           class="inspector"
@@ -173,6 +180,13 @@
         ></aside>
       </div>
     </main>
+    <nav id="mobile-nav" class="mobile-nav" aria-label="Mobile navigation" data-aria="mobileNavigation"></nav>
+    <div id="mobile-more" class="mobile-more" hidden>
+      <div class="mobile-more-card" role="dialog" aria-modal="false" aria-labelledby="mobile-more-heading">
+        <div class="mobile-more-heading"><strong id="mobile-more-heading" data-i18n="mobileMore">More sections</strong><button id="mobile-more-close" type="button" class="subtle" data-i18n="close">Close</button></div>
+        <div id="mobile-more-items" class="mobile-more-items"></div>
+      </div>
+    </div>
     <div id="toasts" aria-live="polite"></div>
     <div
       id="login-screen"
@@ -210,11 +224,20 @@
           Sign in
         </button>
         <p id="login-error" role="alert"></p>
+        <button id="owner-login-mode" type="button" data-i18n="ownerLogin">Owner access</button>
         <small data-i18n="loginHelp"
           >Open from Unity Mod Manager for local owner access.</small
         >
       </form>
     </div>
+    <div id="boot-screen" class="login-screen" role="status" aria-live="polite">
+      <div class="login-card">
+        <h1>Advanced Dispatcher System</h1>
+        <p id="boot-message">Loading the web interface… If loading does not finish, reload the page and check that JavaScript is enabled in your browser.</p>
+        <a id="boot-reload" href="/">Reload page</a>
+      </div>
+    </div>
+    <script src="/src/boot.js"></script>
     <script type="module" src="/src/app.js"></script>
   </body>
 </html>

@@ -5,8 +5,16 @@ import { zoomLimits, clampZoom } from "./camera.js";
 import { signalDetailScale } from "./signal-lod.js";
 import { mapViewport } from "./map-viewport.js";
 
+export function pointsFocus(renderer, points) {
+  points=points.filter(p=>p.every(Number.isFinite));
+  if(!points.length)return null;
+  const area=mapViewport(renderer),xs=points.map(p=>p[0]),zs=points.map(p=>p[1]);
+  const x0=Math.min(...xs),x1=Math.max(...xs),z0=Math.min(...zs),z1=Math.max(...zs);
+  return {x:(x0+x1)/2,z:(z0+z1)/2,zoom:clampZoom(Math.min(zoomLimits.focus,
+    Math.max(80,area.width-120)/Math.max(1,x1-x0),Math.max(80,area.height-120)/Math.max(1,z1-z0)))};
+}
+
 export function objectFocus(renderer, item, zoom = renderer.scale) {
-  const area = mapViewport(renderer);
   const object = renderer.resolve(item, renderer.store);
   if (!object) return null;
   const store = renderer.store;
@@ -43,23 +51,7 @@ export function objectFocus(renderer, item, zoom = renderer.scale) {
       for (let i = 0; i < p.length; i += 2) points.push([p[i], p[i + 1]]);
     }
   }
-  if (points.length) {
-    const x0 = Math.min(...points.map((p) => p[0])),
-      x1 = Math.max(...points.map((p) => p[0])),
-      z0 = Math.min(...points.map((p) => p[1])),
-      z1 = Math.max(...points.map((p) => p[1]));
-    return {
-      x: (x0 + x1) / 2,
-      z: (z0 + z1) / 2,
-      zoom: clampZoom(
-        Math.min(
-          zoomLimits.focus,
-          Math.max(80, area.width - 120) / Math.max(1, x1 - x0),
-          Math.max(80, area.height - 120) / Math.max(1, z1 - z0),
-        ),
-      ),
-    };
-  }
+  if (points.length) return pointsFocus(renderer,points);
   if (!Number.isFinite(object.x) || !Number.isFinite(object.z)) return null;
   const targetZoom = clampZoom(
     Math.max(

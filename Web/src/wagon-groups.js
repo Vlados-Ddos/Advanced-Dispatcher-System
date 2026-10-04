@@ -1,6 +1,7 @@
 import { isWagon } from "./rolling-stock.js";
 import { t, number } from "./localization.js";
 import { matchesSearch } from "./entity-search.js";
+import { carJobVisual, jobTypeText } from "./job-display.js";
 
 export function wagonGroup(store, id) {
   const cached = store.wagonGroupCache?.get(id);
@@ -27,6 +28,10 @@ export function wagonGroup(store, id) {
     length: cars.every((c) => Number.isFinite(c.length) && c.length > 0)
       ? cars.reduce((n, c) => n + c.length, 0)
       : null,
+    massKnown: cars.every((c) => c.massKnown === true),
+    mass: cars.every((c) => c.massKnown === true)
+      ? cars.reduce((n, c) => n + (Number(c.mass) || 0), 0)
+      : 0,
   };
   store.wagonGroupCache?.set(id, summary);
   return { ...first, ...summary };
@@ -35,6 +40,7 @@ export function wagonGroupSummary(store, item) {
   const jobs = new Set(
     (item.carIds || []).map((id) => store.cars.get(id)?.job).filter(Boolean),
   );
+  const job = carJobVisual(store, item);
   return (
     number(item.count) +
     " " +
@@ -42,7 +48,8 @@ export function wagonGroupSummary(store, item) {
     (Number.isFinite(item.length)
       ? " · " + number(item.length, 1) + " " + t("meters")
       : "") +
-    (jobs.size ? " · " + [...jobs].join(", ") : "")
+    (item.massKnown ? " · " + number(item.mass, 1) + " " + t("tons") : "") +
+    (job ? " · " + jobTypeText(job) : jobs.size ? " · " + [...jobs].join(", ") : "")
   );
 }
 // Every wagon occurs once in the flattened virtual list. Expansion is keyed

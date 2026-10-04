@@ -1,9 +1,9 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using AdvancedDispatcherSystem.Core;
 
 namespace AdvancedDispatcherSystem.Host;
 
@@ -15,24 +15,47 @@ public sealed class AuthSession
 {
     public string name, role;
     public long expires;
+    // These fields are Host-only lifecycle state. A browser may reconnect with
+    // the same cookie during the short disconnect grace period, while a second
+    // login for the account is rejected until that lease expires.
+    internal int connections;
+    internal long disconnectedAt;
+    internal readonly CancellationTokenSource revoked = new();
 }
 public sealed class Accounts
 {
+    // Session expiry is an idle timeout. Every authenticated user action
+    // renews this bounded lease; background health polling does not.
+    public const long SessionLifetimeMs = 15 * 60 * 1000;
+    // A browser may suspend a tab or briefly lose a VPN/Wi-Fi route. Keep the
+    // single-account lease recoverable for a bounded 15 minutes, while still
+    // releasing it when the client really stays away.
+    public const long DisconnectGraceMs = 15 * 60 * 1000;
     private readonly string path;
     private readonly object sync = new();
     private List<UserAccount> users;
     private readonly ConcurrentDictionary<string, AuthSession> sessions = new();
     private readonly SemaphoreSlim hashing = new(2, 2);
     private readonly string bootstrap;
+    private readonly long disconnectGraceMs;
+    private readonly Dictionary<string,long> usedOwnerCodes=new();
+    private readonly long ownerCodesSince=Protocol.Now;
     public bool RecoveryRequired { get; private set; }
-    public Accounts(string directory, string bootstrap)
+    public Accounts(string directory, string bootstrap, long disconnectGraceMs = DisconnectGraceMs)
     {
         Directory.CreateDirectory(directory); path = Path.Combine(directory, "accounts.json"); this.bootstrap = bootstrap;
+        this.disconnectGraceMs = Math.Max(1, disconnectGraceMs);
         if (OperatingSystem.IsWindows())
         {
             var security = new DirectorySecurity(); security.SetAccessRuleProtection(true, false);
             security.AddAccessRule(new FileSystemAccessRule(WindowsIdentity.GetCurrent().User, FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
             new DirectoryInfo(directory).SetAccessControl(security);
+        }
+        else
+        {
+            // Portable hosts keep password hashes and private TLS keys in this
+            // directory too. Do not inherit a world-readable process umask.
+            File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
         users = new();
         if (File.Exists(path)) {
@@ -51,7 +74,7 @@ public sealed class Accounts
                 Console.Error.WriteLine("ACCOUNTS_RECOVERY_REQUIRED " + e.GetType().Name);
             }
         }
-        if (users.Count == 0 && !RecoveryRequired)
+        if (users.Count == 0 && !RecoveryRequired && !File.Exists(path))
         {
             var password = Convert.ToHexString(RandomNumberGenerator.GetBytes(12));
             users.Add(Make("admin", "dispatcher", password)); Save();
@@ -75,25 +98,57 @@ public sealed class Accounts
         string temp = path + ".tmp"; File.WriteAllBytes(temp, Json.Bytes(next ?? users)); File.Move(temp, path, true);
     }
     public object[] List() { lock (sync) return users.Select(x => (object)new { x.name, role = x.role == "admin" ? "dispatcher" : x.role }).ToArray(); }
-    public bool Set(string name, string role, string password)
+    private enum Mutation { Upsert, Create, Update }
+    // Legacy in-process setup/recovery callers intentionally use upsert. HTTP
+    // profile operations use Create/Update so user intent is checked atomically.
+    public bool Set(string name, string role, string password) => Change(name, role, password, Mutation.Upsert) == null;
+    public string Create(string name, string role, string password) => Change(name, role, password, Mutation.Create);
+    public string Update(string name, string role, string password) => Change(name, role, password, Mutation.Update);
+    private string Change(string name, string role, string password, Mutation mutation)
     {
-        if (string.IsNullOrWhiteSpace(name) || name == "local-owner" || name.Length > 48 || !name.All(c => char.IsLetterOrDigit(c) || c == '-' || c == '_') || (role != "dispatcher" && role != "viewer") || password == null || password.Length < 10 || password.Length > 128) return false;
-        var replacement = Make(name, role, password);
+        if (string.IsNullOrWhiteSpace(name) || name == "local-owner" || name.Length > 48 || !name.All(c => char.IsLetterOrDigit(c) || c == '-' || c == '_') ||
+            (role != "dispatcher" && role != "viewer") ||
+            (!string.IsNullOrEmpty(password) && (string.IsNullOrWhiteSpace(password) || password.Length < 10 || password.Length > 128)) ||
+            (mutation == Mutation.Create && string.IsNullOrEmpty(password))) return "INVALID_ACCOUNT";
+        var replacement = string.IsNullOrEmpty(password) ? null : Make(name, role, password);
         lock (sync)
         {
             int index = users.FindIndex(x => x.name == name);
-            if (index < 0 && users.Count >= 100) return false;
+            // Another request may have created/deleted this exact identity
+            // while password hashing ran. Never turn an edit into a creation.
+            if (mutation == Mutation.Create && index >= 0) return "ACCOUNT_EXISTS";
+            if (mutation == Mutation.Update && index < 0) return "ACCOUNT_NOT_FOUND";
+            if (index < 0 && users.Count >= 100) return "ACCOUNT_LIMIT";
+            if (replacement == null)
+            {
+                if (index < 0) return "INVALID_ACCOUNT";
+                var current = users[index];
+                replacement = new UserAccount { name = current.name, role = role, salt = current.salt, hash = current.hash };
+            }
             var next = new List<UserAccount>(users);
             if (index >= 0) next[index] = replacement; else next.Add(replacement);
             Save(next); users = next; RecoveryRequired = false;
-            foreach (var item in sessions) if (item.Value.name == name) { item.Value.expires = -1; sessions.TryRemove(item.Key, out _); }
+            foreach (var item in sessions) if (item.Value.name == name) RemoveSessionLocked(item.Key);
         }
-        return true;
+        return null;
     }
-    public async Task<(string Token, AuthSession Session)> Login(string name, string password, string ticket, bool loopback)
+    public bool Delete(string name)
+    {
+        if (string.IsNullOrEmpty(name) || name == "local-owner") return false;
+        lock (sync)
+        {
+            int index = users.FindIndex(x => x.name == name);
+            if (index < 0) return false;
+            var next = new List<UserAccount>(users); next.RemoveAt(index);
+            Save(next); users = next;
+            foreach (var item in sessions) if (item.Value.name == name) RemoveSessionLocked(item.Key);
+            return true;
+        }
+    }
+    public async Task<(string Token, AuthSession Session, string Error)> Login(string name, string password, string ticket, bool loopback, string currentToken = null)
     {
         UserAccount account;
-        bool ownerLogin = loopback && !string.IsNullOrEmpty(ticket) && Fixed(ticket, bootstrap);
+        bool ownerLogin = loopback && OwnerAccess.Validate(bootstrap,ticket,notBefore:ownerCodesSince);
         if (ownerLogin)
             account = new UserAccount { name = "local-owner", role = "admin" };
         else
@@ -110,24 +165,102 @@ public sealed class Accounts
             finally { hashing.Release(); }
         }
         lock (sync) {
+            if(ownerLogin) {
+                foreach(var entry in usedOwnerCodes.Where(p=>p.Value<Protocol.Now).ToArray())usedOwnerCodes.Remove(entry.Key);
+                if(!OwnerAccess.Validate(bootstrap,ticket,notBefore:ownerCodesSince)||usedOwnerCodes.ContainsKey(ticket)||usedOwnerCodes.Count>=256)return default;
+            }
             // A password/role edit may have occurred while PBKDF2 ran outside the lock.
             if (!ownerLogin && !users.Any(user => ReferenceEquals(user, account))) return default;
-            foreach (var entry in sessions) if (entry.Value.expires < Environment.TickCount64) sessions.TryRemove(entry.Key, out _);
+            long now = Environment.TickCount64;
+            CleanupExpiredLocked(now);
+            // Credentials were verified above. Reopening the dispatcher in the
+            // same browser retains its one session instead of locking itself out.
+            if (currentToken != null && sessions.TryGetValue(currentToken, out var current) && current.name == account.name)
+            {
+                if (ownerLogin) usedOwnerCodes[ticket] = Protocol.Now + OwnerAccess.LifetimeMs;
+                if (current.connections == 0) current.disconnectedAt = now;
+                return (currentToken, current, null);
+            }
+            if (sessions.Values.Any(existing => string.Equals(existing.name, account.name, StringComparison.Ordinal)))
+                return (null, null, "SESSION_ACTIVE");
             if (sessions.Count >= 256) return default;
+            if(ownerLogin)usedOwnerCodes[ticket]=Protocol.Now+OwnerAccess.LifetimeMs;
             var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
-            var session = new AuthSession { name = account.name, role = ownerLogin ? "admin" : account.role == "admin" ? "dispatcher" : account.role, expires = Environment.TickCount64 + 8 * 3600000L };
-            sessions[token] = session; return (token, session);
+            var session = new AuthSession { name = account.name, role = ownerLogin ? "admin" : account.role == "admin" ? "dispatcher" : account.role, expires = Environment.TickCount64 + SessionLifetimeMs, disconnectedAt = Environment.TickCount64 };
+            sessions[token] = session; return (token, session, null);
         }
     }
 
-    public AuthSession Get(string token)
+    public AuthSession Get(string token, bool touch = true)
     {
-        if (token == null || !sessions.TryGetValue(token, out var value)) return null;
-        if (value.expires < Environment.TickCount64) { sessions.TryRemove(token, out _); return null; }
-        return value;
+        if (token == null) return null;
+        lock (sync)
+        {
+            if (!sessions.TryGetValue(token, out var value)) return null;
+            long now = Environment.TickCount64;
+            if (ExpiredLocked(value, now)) { RemoveSessionLocked(token); return null; }
+            if (touch) value.expires = now + SessionLifetimeMs;
+            // Reading a cookie is not proof of a live browser connection. Only
+            // BeginConnection clears the disconnect lease; otherwise /api/me
+            // could strand the account for the full session lifetime.
+            return value;
+        }
     }
-    public void Logout(string token) { if (token != null && sessions.TryRemove(token, out var session)) session.expires = -1; }
-    public static bool Fixed(string a, string b) => a != null && b != null && CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(a), Encoding.UTF8.GetBytes(b));
+    public AuthSession BeginConnection(string token)
+    {
+        if (token == null) return null;
+        lock (sync)
+        {
+            if (!sessions.TryGetValue(token, out var value)) return null;
+            long now = Environment.TickCount64;
+            if (ExpiredLocked(value, now)) { RemoveSessionLocked(token); return null; }
+            value.connections++;
+            value.disconnectedAt = 0;
+            value.expires = now + SessionLifetimeMs;
+            return value;
+        }
+    }
+    public AuthSession Touch(string token)
+    {
+        if (token == null) return null;
+        lock (sync)
+        {
+            if (!sessions.TryGetValue(token, out var value)) return null;
+            long now = Environment.TickCount64;
+            if (ExpiredLocked(value, now)) { RemoveSessionLocked(token); return null; }
+            value.expires = now + SessionLifetimeMs;
+            return value;
+        }
+    }
+    public void EndConnection(string token)
+    {
+        if (token == null) return;
+        lock (sync)
+        {
+            if (!sessions.TryGetValue(token, out var value)) return;
+            if (value.connections > 0 && --value.connections == 0 && value.expires > Environment.TickCount64) value.disconnectedAt = Environment.TickCount64;
+        }
+    }
+    public void Logout(string token)
+    {
+        if (token == null) return;
+        lock (sync)
+        {
+            RemoveSessionLocked(token);
+        }
+    }
+    private void RemoveSessionLocked(string token)
+    {
+        if (!sessions.TryRemove(token, out var session)) return;
+        session.expires = -1; session.connections = 0; session.disconnectedAt = 0;
+        session.revoked.Cancel();
+    }
+    private bool ExpiredLocked(AuthSession session, long now)
+        => session.expires <= now || (session.disconnectedAt > 0 && now - session.disconnectedAt >= disconnectGraceMs);
+    private void CleanupExpiredLocked(long now)
+    {
+        foreach (var item in sessions) if (ExpiredLocked(item.Value, now)) RemoveSessionLocked(item.Key);
+    }
 }
 
 public sealed class RateGate

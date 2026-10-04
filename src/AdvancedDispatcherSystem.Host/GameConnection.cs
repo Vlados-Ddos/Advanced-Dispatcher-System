@@ -45,6 +45,21 @@ public sealed class GameConnection
                         if (MotionCodec.IsMotion(bytes)) { hub.Apply(MotionCodec.Read(bytes)); continue; }
                         var frame = Json.Read<WireFrame>(bytes);
                         if (frame == null || frame.protocol != Protocol.Version) throw new IOException("PROTOCOL_VERSION");
+                        if (frame.motionCount < 0 || frame.motionCount > 100000) throw new InvalidDataException("MOTION_COUNT");
+                        if (frame.motionCount > 0)
+                        {
+                            if (frame.kind != "state" || frame.batch == null || frame.batch.motions?.Count > 0)
+                                throw new InvalidDataException("MOTION_PAIR_METADATA");
+                            // Apply occupancy, metadata and motion together. Publishing
+                            // the first half would briefly turn this train's new track
+                            // into an unidentified obstacle and invalidate its route.
+                            using var pairDeadline = CancellationTokenSource.CreateLinkedTokenSource(connection.Token);
+                            pairDeadline.CancelAfter(5000);
+                            var motion = MotionCodec.Read(await Framing.Read(stream, pairDeadline.Token));
+                            if (motion.epoch != frame.batch.epoch || motion.topologyRevision != frame.batch.topologyRevision || motion.motions.Count != frame.motionCount)
+                                throw new InvalidDataException("MOTION_PAIR_MISMATCH");
+                            frame.batch.motions = motion.motions;
+                        }
                         if (frame.kind == "topology" && frame.topology != null) hub.SetTopology(frame.topology);
                         else if (frame.kind == "state" && frame.batch != null) hub.Apply(frame.batch);
                         else if (frame.kind == "result" && frame.result != null && pending.TryRemove(frame.result.id, out var waiter)) waiter.TrySetResult(frame.result);
@@ -52,7 +67,7 @@ public sealed class GameConnection
                 }
                 finally { connection.Cancel(); client.Dispose(); try { await writer; } catch (Exception e) when (e is IOException || e is InvalidDataException || e is SocketException || e is OperationCanceledException || e is ObjectDisposedException) { /* Connection already closing. */ } }
             }
-            catch (Exception e) when (e is IOException || e is InvalidDataException || e is SocketException || e is OperationCanceledException || e is System.Text.Json.JsonException || e is ArgumentException)
+            catch (Exception e) when (e is IOException || e is InvalidDataException || e is SocketException || e is OperationCanceledException || e is ObjectDisposedException || e is System.Text.Json.JsonException || e is ArgumentException)
             { if (!stop.IsCancellationRequested) Console.Error.WriteLine("IPC_RECONNECT " + e.GetType().Name); }
             finally
             {

@@ -119,7 +119,6 @@ export class PanelLayout {
     window.addEventListener("ads-display", () => this.apply());
     window.addEventListener("resize", () => this.apply());
     window.addEventListener("blur", () => this.finish(null, true));
-    window.addEventListener("ads-reset-panels", () => this.reset());
     this.observer = new ResizeObserver(() => {
       this.apply();
       onResize();

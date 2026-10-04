@@ -19,6 +19,12 @@ namespace AdvancedDispatcherSystem.Game
             return searchNames[cacheKey] = names.ToArray();
         }
         internal static void ResetSearchNames() => searchNames.Clear();
+        public static string Translation(string key, string language)
+        {
+            if (string.IsNullOrEmpty(key)) return null;
+            var value = I2.Loc.LocalizationManager.GetTranslation(key, overrideLanguage: language);
+            return Usable(value) && value != key ? value : null;
+        }
         public static bool Usable(string value)
         {
             if (string.IsNullOrWhiteSpace(value)) return false;

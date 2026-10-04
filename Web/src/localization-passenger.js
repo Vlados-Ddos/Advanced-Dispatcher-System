@@ -71,10 +71,6 @@ export const passengerText = {
   parentLocation: ["To the station", "К станции"],
   showStop: ["Show stop", "Показать остановку"],
   noLocations: ["No locations in this group.", "В этой группе нет локаций."],
-  passengerStatus_absent: [
-    "Passenger Jobs is not active. Base-game locations remain available.",
-    "Passenger Jobs не активен. Локации основной игры доступны.",
-  ],
   passengerStatus_loading: [
     "Passenger stops are waiting for live platform data.",
     "Ожидание данных о загруженных пассажирских платформах.",

@@ -23,6 +23,7 @@ namespace AdvancedDispatcherSystem.Game
         private IMultiplayerAdapter multiplayer;
         private ISignalsAdapter signals;
         private string signalsError;
+        private bool loggedGameTimeUnavailable;
         private Harmony harmony;
         private readonly Stopwatch watch = new Stopwatch();
         private readonly Dictionary<string, SwitchState> switchStates = new Dictionary<string, SwitchState>();
@@ -42,6 +43,27 @@ namespace AdvancedDispatcherSystem.Game
         private readonly Queue<string> completionOrder = new Queue<string>();
         private CarSpawner spawner;
         public string Status => (world ? Main.L("tracks") + " " + tracks.Length + " · " + Main.L("cars") + " " + carStates.Count + " · " + Main.L("signals") + " " + signalStates.Count + " · " + captureMs.ToString("F2") + " " + Main.L("milliseconds") + " · " + Main.L(multiplayer.Mode) : Main.L("waiting")) + (building ? " · " + Main.L("loading") : "");
+        public bool IsMultiplayerClient => multiplayer?.Mode == "client";
+        private HostSettingsState effectiveHostSettings;
+        private bool ShowUndiscovered => effectiveHostSettings?.showUndiscovered ?? Main.Config.ShowUndiscovered;
+        public HostSettingsState CurrentHostSettings
+        {
+            get
+            {
+                string mode = multiplayer?.Mode;
+                var provider = multiplayer as IHostSettingsProvider;
+                if (mode == "client") return effectiveHostSettings = provider?.CurrentHostSettings;
+                if (mode != "host" && mode != "singleplayer") return effectiveHostSettings = null;
+                var local = new HostSettingsState {
+                    readOnly = Main.Config.ReadOnly, showUndiscovered = Main.Config.ShowUndiscovered,
+                    adminControls = Main.Config.AdminControls, captureBudgetMs = Main.Config.CaptureBudgetMs,
+                    remoteLanAccess = Main.Bridge?.RemoteLanAccess ?? Main.Config.RemoteLanAccess,
+                    port = Main.Bridge?.Port ?? Main.Config.Port, publicHost = Main.Bridge?.PublicHost ?? Main.Config.PublicHost ?? ""
+                };
+                provider?.UpdateHostSettings(local);
+                return effectiveHostSettings = local;
+            }
+        }
 
         private void Awake()
         {
@@ -66,10 +88,10 @@ namespace AdvancedDispatcherSystem.Game
             ResetRoutes("STALE_EPOCH"); watchedRoutes.Clear(); executionGraph=null;
             if (world && topology != null) Main.Bridge?.Send(new WireFrame { kind = "state", batch = new GameBatch { epoch = epoch, topologyRevision = topologyRevision, capabilities = new CapabilityState { status = "unloaded", mode = multiplayer.Mode, language = Main.LanguageCode } } });
             ResetTables("WORLD_NOT_READY");
-            world = false; building = false; StopAllCoroutines(); StopJobCapture(); VehiclePresentation.Reset();
+            world = false; building = false; StopAllCoroutines(); StopJobCapture(); VehiclePresentation.Reset(); WeatherCapture.Reset();
             try { signals?.Reset(); } catch (Exception e) { DropSignals(e); } jobsRunning = false; lastJobs = new JobState[0]; lastLocations = new StationDef[0]; ResetJobHistory(); ResetSigns(); ClearEvents(); carJobs.Clear(); nextJobs = 0;
             if (spawner != null) { spawner.CarSpawned -= CarAdded; spawner.CarAboutToBeDeleted -= CarRemoved; spawner = null; }
-            DetachJunctions(); carEntries.Clear(); carList.Clear(); carStates.Clear(); switchStates.Clear(); signalStates.Clear(); blockStates.Clear(); occupancyStates.Clear();
+            DetachJunctions(); carEntries.Clear(); carList.Clear(); consistMassCache.Clear(); carStates.Clear(); switchStates.Clear(); signalStates.Clear(); blockStates.Clear(); occupancyStates.Clear();
             ClearChanges(); trackIds.Clear(); junctionIds.Clear(); junctionById.Clear(); tracks = new RailTrack[0]; worldJunctions = new Junction[0]; trackOccupancy = new RailTrackBogiesOnTrack[0]; linkSignatures = new int[0]; topology = null; rebuildAt = float.PositiveInfinity;
             completed.Clear(); completionOrder.Clear(); pendingSwitches.Clear();
         }
@@ -94,6 +116,9 @@ namespace AdvancedDispatcherSystem.Game
         private void CaptureUpdate()
         {
             RefreshIntegrations();
+            // Resolve once per capture frame; per-car visibility reads the
+            // retained snapshot without allocating or invoking MPAPI again.
+            _ = CurrentHostSettings;
             PollTableCommands();
             PollRoutes();
             if (!world) {
@@ -104,7 +129,7 @@ namespace AdvancedDispatcherSystem.Game
             {
                 if (!building && Time.realtimeSinceStartup >= rebuildAt) { rebuildAt = float.PositiveInfinity; StartCoroutine(BuildTopology()); }
                 if (building || topology == null) return;
-                if (Main.Bridge != null && Main.Bridge.Connected && Main.Bridge.TakeResync()) {ResetRoutes("GAME_DISCONNECTED");Replay();}
+                ReplayIfRequested();
                 if (Main.Bridge != null && Main.Bridge.TryCommand(out var command)) Execute(command);
                 double budget = Math.Max(0.3, Main.Config.CaptureBudgetMs);
                 // Advance the existing iterator inside the same frame budget.
@@ -112,7 +137,7 @@ namespace AdvancedDispatcherSystem.Game
                 // budget and capture timing, even when signal/car capture used it all.
                 if (watch.Elapsed.TotalMilliseconds < budget * 0.3) StepJobs();
                 if (watch.Elapsed.TotalMilliseconds < budget * 0.2) SamplePendingSign();
-                if (!scanning && Time.realtimeSinceStartup >= nextCycle) { scanning = true; carCursor = trackCursor = junctionCursor = 0; auditTopology = Time.realtimeSinceStartup >= nextTopologyAudit; }
+                if (!scanning && Time.realtimeSinceStartup >= nextCycle) { scanning = true; carCursor = trackCursor = junctionCursor = 0; consistMassCache.Clear(); auditTopology = Time.realtimeSinceStartup >= nextTopologyAudit; }
                 while (scanning && watch.Elapsed.TotalMilliseconds < budget * 0.7)
                 {
                     if (carCursor < carList.Count) SampleCar(carList[carCursor++]);
@@ -129,7 +154,9 @@ namespace AdvancedDispatcherSystem.Game
             }
             catch (Exception e) { Main.Log("CAPTURE_FAILED", e); nextCycle = Time.realtimeSinceStartup + 1; scanning = false; }
         }
-        private CapabilityState Capabilities() => new CapabilityState
+        private CapabilityState Capabilities()
+        {
+            var capability = new CapabilityState
         {
             language = Main.LanguageCode,
             gameTime = DV.Logic.Job.JobsManager.Instance?.Time ?? 0,
@@ -149,36 +176,38 @@ namespace AdvancedDispatcherSystem.Game
             carCount = carStates.Count,
             signalCount = System.Linq.Enumerable.Count(signalStates.Values, s => s.objectKind != "sign"),
             captureMs = captureMs,
+            hostSettings = CurrentHostSettings,
+            weather = WeatherCapture.Read(),
             sampledAt = Protocol.Now
         };
-        private void Replay()
-        {
-            Main.Bridge.Send(new WireFrame { kind = "topology", topology = topology });
-            Main.Bridge.Send(new WireFrame
+            // JobsManager.Time is an elapsed job timer, not the current in-game
+            // clock. Read the same native WorldClockController used by the
+            // game's clocks and job start-date capture, preserving an explicit
+            // unknown state while the world is still loading.
+            try
             {
-                kind = "state",
-                batch = new GameBatch
+                var clock = DV.TimeKeeping.WorldClockController.Instance;
+                if (clock != null)
                 {
-                    epoch = epoch,
-                    topologyRevision = topologyRevision,
-                    reset = true, events = TakeEvents(),
-                    routeStates = RouteStates(),
-                    switches = Values(switchStates), turntables = CaptureTables(true),
-                    cars = Values(carStates),
-                    signals = Values(signalStates),
-                    blocks = Values(blockStates),
-                    occupancy = Values(occupancyStates),
-                    players = CapturePlayers(),
-                    replacePlayers = true,
-                    signs = Values(signStates), replaceSigns = true,
-                    jobs = lastJobs, locations = lastLocations, replaceLocations = true,
-                    replaceJobs = true,
-                    capabilities = Capabilities()
+                    var time = clock.GetCurrentAnglesAndTimeOfDay();
+                    if (time.validTime)
+                    {
+                        capability.gameTimeOfDay = time.timeOfDay.Hour + time.timeOfDay.Minute / 60d;
+                        capability.gameTimeOfDayKnown = true;
+                        loggedGameTimeUnavailable = false;
+                    }
                 }
-            });
-            ClearChanges();
+            }
+            catch (Exception e)
+            {
+                if (!loggedGameTimeUnavailable)
+                {
+                    loggedGameTimeUnavailable = true;
+                    Main.Log("GAME_TIME_CAPTURE_UNAVAILABLE", e);
+                }
+            }
+            return capability;
         }
-        private static T[] Values<T>(Dictionary<string, T> map) { var result = new T[map.Count]; map.Values.CopyTo(result, 0); return result; }
         private void Publish()
         {
             bool playerDue = Time.realtimeSinceStartup >= nextPlayers;
@@ -235,13 +264,15 @@ namespace AdvancedDispatcherSystem.Game
             if (completed.TryGetValue(c.id, out var done)) { Main.Bridge.Send(new WireFrame { kind = "result", result = done }); return; }
             try
             {
+                if(TryJobCommand(c))return;
+                if(TryRouteCommand(c))return;
                 if (c.kind == "setSwitch")
                 {
                     if (!junctionById.TryGetValue(c.target ?? "", out var j) || j == null) { Result(Error("NOT_FOUND")); return; }
                     if (!switchStates.TryGetValue(c.target, out var state)) { ReadSwitch(j); Result(Error("STALE_REVISION")); return; }
                     if (state.branch != j.selectedBranch || c.expectedRevision != state.revision) { ReadSwitch(j); Result(Error("STALE_REVISION")); return; }
                     if (c.branch < 0 || c.branch > byte.MaxValue || c.branch >= j.outBranches.Count) { Result(Error("INVALID_BRANCH")); return; }
-                    if (!AllowsProtectedSwitch(j,c.branch)) { Result(Error("SWITCH_LOCKED")); return; }
+                    if (!AllowsProtectedSwitch(j,c.branch,c.routeId)) { Result(Error("SWITCH_LOCKED")); return; }
                     string unsafeSwitch = j.selectedBranch == c.branch ? null : SwitchSafety(j);
                     if (unsafeSwitch != null) { Result(Error(unsafeSwitch)); return; }
                     RememberRouteSwitch(c, j);
@@ -253,7 +284,6 @@ namespace AdvancedDispatcherSystem.Game
                     Main.Bridge?.Send(new WireFrame { kind = "state", batch = new GameBatch { epoch = epoch, topologyRevision = topologyRevision, switches = new[] { switchStates[c.target] } } });
                     Result(new CommandResult { id = c.id, target = c.target, status = j.selectedBranch == c.branch ? "applied" : "rejected", code = j.selectedBranch == c.branch ? null : "SWITCH_CHANGED_EXTERNALLY", revision = switchStates[c.target].revision });
                 }
-                else if (c.kind == "watchRoute" || c.kind == "reserveGameRoute" || c.kind == "releaseGameRoute" || c.kind == "endGameRoute") RouteCommand(c);
                 else if (c.kind == "setTurntable") {var reserved=ReservedTable(c.target,c);if(reserved!=null)Result(Error(reserved));else TurntableCommand(c);}
                 else if (c.kind == "loco") Result(c.role == "admin" && Main.Config.AdminControls ? LocoCommand(c) : Error("FORBIDDEN"));
                 else if (c.kind == "rescan") { RequestRebuild(0); Result(new CommandResult { id = c.id, status = "applied" }); }

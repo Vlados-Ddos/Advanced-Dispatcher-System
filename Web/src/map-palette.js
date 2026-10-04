@@ -4,8 +4,11 @@ export const mapPalette = Object.freeze({
   branchBorder: "#1c426d",
   selected: "#47ceff",
   route: "#efc66a",
+  routePreview: "#65b9ff",
+  routeAffected: "#ff9f43",
   reservation: "#c69cff",
   protectedReservation: "#b58bff",
+  protectionFootprint: "#8f78c7",
 });
 
 // A parallel annotation stroke keeps occupancy on the actual centreline.

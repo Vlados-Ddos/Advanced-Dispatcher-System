@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -15,6 +16,7 @@ namespace AdvancedDispatcherSystem.Game
     public sealed class IpcBridge : IDisposable
     {
         private static readonly object workerGate = new object();
+        private readonly object lifetimeGate = new object();
         private static Task previousWorker = Task.CompletedTask;
         private int started, disposed, restartAttempts;
         private sealed class Work { public WireFrame frame; public Action release; }
@@ -25,7 +27,8 @@ namespace AdvancedDispatcherSystem.Game
         }
         private readonly string directory, secret;
         private readonly int webPort;
-        private readonly bool lan, https;
+        private readonly bool remoteAccess;
+        private readonly string publicHost;
         private string auditedTopology;
         private readonly CancellationTokenSource stop = new CancellationTokenSource();
         private readonly BlockingCollection<Work> output = new BlockingCollection<Work>(64);
@@ -40,8 +43,12 @@ namespace AdvancedDispatcherSystem.Game
         public volatile string LastError = "";
         public bool Connected => connected;
         public string Address { get; private set; }
+        public int Port => webPort;
+        public bool RemoteLanAccess => remoteAccess;
+        public string PublicHost => publicHost;
         public IpcBridge(string directory, Settings config, string secret)
-        { this.directory = directory; this.secret = secret; webPort = config.Port; lan = config.Lan; https = config.Https; Address = (https ? "https" : "http") + "://127.0.0.1:" + webPort; }
+        { this.directory = directory; this.secret = secret; webPort = config.Port; remoteAccess = config.RemoteLanAccess; publicHost = (config.PublicHost ?? "").Replace("\"", "").Replace("\r", "").Replace("\n", ""); Address = (remoteAccess ? "https" : "http") + "://localhost:" + webPort; }
+
         public void Start()
         {
             if (Interlocked.Exchange(ref started, 1) != 0) return;
@@ -56,19 +63,51 @@ namespace AdvancedDispatcherSystem.Game
         }
         private void Launch(int port)
         {
-            string exe = Path.Combine(directory, "Host", "AdvancedDispatcherSystem.Host.exe");
+            bool windows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+            string exe = windows
+                ? Path.Combine(directory, "Host", "AdvancedDispatcherSystem.Host.exe")
+                : Path.Combine(directory, "Host", "linux-x64", "AdvancedDispatcherSystem.Host");
+            string arguments = "--port " + webPort + " --remote-access " + remoteAccess.ToString().ToLowerInvariant() + " --ipc-port " + port + " --parent " + Process.GetCurrentProcess().Id + " --config \"" + Path.Combine(directory,"Host","data") + "\"";
+            if (!string.IsNullOrWhiteSpace(publicHost)) arguments += " --public-host \"" + publicHost + "\"";
+            if (!File.Exists(exe) && !windows)
+            {
+                exe = "dotnet";
+                // The Windows self-contained output has includedFrameworks and
+                // Windows native hostpolicy. Linux needs a framework-dependent
+                // publish referencing its installed ASP.NET Core runtime.
+                string managed = Path.Combine(directory, "Host", "portable", "AdvancedDispatcherSystem.Host.dll");
+                if (!File.Exists(managed)) throw new FileNotFoundException("WEB_HOST_BINARY_MISSING", managed);
+                arguments = "\"" + managed + "\" " + arguments;
+            }
+            if (!windows && !File.Exists(exe) && exe != "dotnet") throw new FileNotFoundException("WEB_HOST_BINARY_MISSING", exe);
             var info = new ProcessStartInfo(exe)
             {
-                WorkingDirectory = Path.GetDirectoryName(exe),
+                WorkingDirectory = Path.Combine(directory, "Host"),
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 WindowStyle = ProcessWindowStyle.Hidden,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
-                Arguments = "--port " + webPort + " --lan " + lan.ToString().ToLowerInvariant() + " --https " + https.ToString().ToLowerInvariant() + " --ipc-port " + port + " --parent " + Process.GetCurrentProcess().Id
+                Arguments = arguments
             };
-            info.EnvironmentVariables["ADS_IPC_TOKEN"] = secret; process = Process.Start(info);
-            process.ErrorDataReceived += (s, e) => { if (!string.IsNullOrEmpty(e.Data)) LastError = e.Data.Length > 240 ? e.Data.Substring(0, 240) : e.Data; }; process.OutputDataReceived += (s, e) => { }; process.BeginErrorReadLine(); process.BeginOutputReadLine();
+            info.EnvironmentVariables["ADS_IPC_TOKEN"] = secret;
+            var launched = Process.Start(info); process = launched;
+            launched.ErrorDataReceived += (s, e) => {
+                // An exited child can finish delivering stderr after teardown.
+                // It must not overwrite the terminal failure or a new Host's status.
+                if (Volatile.Read(ref disposed) == 0 && ReferenceEquals(process, launched) && !string.IsNullOrEmpty(e.Data))
+                    LastError = e.Data.Length > 240 ? e.Data.Substring(0, 240) : e.Data;
+            };
+            launched.OutputDataReceived += (s, e) => { }; launched.BeginErrorReadLine(); launched.BeginOutputReadLine();
+        }
+        private bool TryLaunch(int port)
+        {
+            try { Launch(port); return true; }
+            catch (Exception e)
+            {
+                LastError = "WEB_HOST_START_FAILED " + e.GetType().Name;
+                return false;
+            }
         }
         public bool TakeResync() => Interlocked.Exchange(ref resync, 0) != 0;
         public bool Send(WireFrame frame, Action release = null)
@@ -80,15 +119,18 @@ namespace AdvancedDispatcherSystem.Game
         private async Task<TcpClient> AcceptHost()
         {
             var accept = listener.AcceptTcpClientAsync();
+            long waitingSince = Stopwatch.GetTimestamp();
             try {
                 while (!accept.IsCompleted) {
                     stop.Token.ThrowIfCancellationRequested();
-                    if (process == null || process.HasExited) {
+                    bool startupTimedOut = Stopwatch.GetTimestamp() - waitingSince >= 15L * Stopwatch.Frequency;
+                    if (process == null || process.HasExited || startupTimedOut) {
                         KillHost();
+                        if (restartAttempts >= 5) throw new IOException("WEB_HOST_START_RETRIES_EXHAUSTED");
                         LastError = "WEB_HOST_RESTARTING";
                         await Task.Delay(Math.Min(30000, 1000 << Math.Min(5, restartAttempts++)), stop.Token).ConfigureAwait(false);
-                        try { Launch(((IPEndPoint)listener.LocalEndpoint).Port); }
-                        catch (Exception e) when (e is IOException || e is System.ComponentModel.Win32Exception) { LastError = "WEB_HOST_RESTART_FAILED " + e.GetType().Name; }
+                        if (!TryLaunch(((IPEndPoint)listener.LocalEndpoint).Port)) LastError = "WEB_HOST_RESTART_FAILED";
+                        waitingSince = Stopwatch.GetTimestamp();
                     }
                     await Task.WhenAny(accept, Task.Delay(500, stop.Token)).ConfigureAwait(false);
                 }
@@ -108,7 +150,11 @@ namespace AdvancedDispatcherSystem.Game
             {
                 if (stop.IsCancellationRequested) return;
                 // Reserve the ephemeral loopback port before launching the authenticated client.
-                listener = new TcpListener(IPAddress.Loopback, 0); listener.Start(4); if (stop.IsCancellationRequested) return; Launch(((IPEndPoint)listener.LocalEndpoint).Port);
+                listener = new TcpListener(IPAddress.Loopback, 0); listener.Start(4); if (stop.IsCancellationRequested) return;
+                // Keep the IPC listener alive even when the first Host process
+                // launch fails. AcceptHost will apply the same bounded retry
+                // policy instead of terminating the bridge permanently.
+                TryLaunch(((IPEndPoint)listener.LocalEndpoint).Port);
                 while (!stop.IsCancellationRequested)
                 {
                     using (var client = await AcceptHost().ConfigureAwait(false))
@@ -128,7 +174,10 @@ namespace AdvancedDispatcherSystem.Game
                                 await Write(stream, new WireFrame { kind = "ready" }, auth.Token).ConfigureAwait(false);
                             }
                             while (output.TryTake(out var discarded)) discarded.release?.Invoke();
-                            connected = true; restartAttempts = 0; Interlocked.Exchange(ref resync, 1); LastError = "";
+                            // Repeated child-process crashes require an explicit UMM
+                            // restart after the bounded recovery budget is exhausted.
+                            // Ordinary browser/network reconnects do not spend it.
+                            connected = true; Interlocked.Exchange(ref resync, 1); LastError = "";
                             var writer = Task.Run(async () =>
                             {
                                 try { foreach (var work in output.GetConsumingEnumerable(connection.Token)) { try { await Write(stream, work.frame, connection.Token).ConfigureAwait(false); } finally { work.release?.Invoke(); } } }
@@ -151,10 +200,17 @@ namespace AdvancedDispatcherSystem.Game
                 }
             }
             catch (Exception e) { if (!stop.IsCancellationRequested) LastError = "WEB_HOST_FAILED " + e.Message; }
-            finally { connected = false; listener?.Stop(); while (output.TryTake(out var discarded)) discarded.release?.Invoke(); KillHost(); encoded.Dispose(); }
+            finally {
+                // Join the public cancellation path before disposing resources;
+                // repeated Host restarts must not retain queue/CTS wait handles.
+                Dispose(); connected = false;
+                while (output.TryTake(out var discarded)) discarded.release?.Invoke();
+                KillHost(); encoded.Dispose(); output.Dispose(); stop.Dispose();
+            }
         }
         private async Task Write(Stream stream, WireFrame frame, CancellationToken cancel)
         {
+            frame.motionCount = frame.batch?.motions?.Count ?? 0;
             encoded.SetLength(0);
             using (var writer = new StreamWriter(encoded, new UTF8Encoding(false), 4096, true)) using (var json = new JsonTextWriter(writer) { CloseOutput = false }) { serializer.Serialize(json, frame); json.Flush(); writer.Flush(); }
             await Framing.Write(stream, encoded.GetBuffer(), (int)encoded.Length, cancel).ConfigureAwait(false);
@@ -185,9 +241,11 @@ namespace AdvancedDispatcherSystem.Game
         }
         public void Dispose()
         {
+            lock(lifetimeGate) {
             if (Interlocked.Exchange(ref disposed, 1) != 0) return;
             stop.Cancel(); current?.Close(); listener?.Stop(); output.CompleteAdding();
             // Run's finally owns process teardown; Start waits for that worker before replacing it.
+            }
         }
     }
 }

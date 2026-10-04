@@ -62,7 +62,11 @@ export function prepareSpeedPaths(renderer) {
     points.forEach((p, i) =>
       i ? path.lineTo(p.x, -p.z) : path.moveTo(p.x, -p.z),
     );
-    return { ...s, path, middle: points[Math.floor(points.length / 2)] };
+    const middleSpan = (s.from + s.to) / 2;
+    const middle = sectionPoints(
+      renderer.store.tracks.get(s.track), middleSpan, middleSpan,
+    )[0];
+    return { ...s, path, middle };
   });
 }
 export function drawDetails(r, ctx, pass = "all") {

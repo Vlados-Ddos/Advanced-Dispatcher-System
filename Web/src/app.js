@@ -13,6 +13,8 @@ const store = new Store(),
   renderer = new Renderer(store),
   ui = new UI(store, network, renderer);
 new PanelLayout(() => ui.renderRows());
+for (const eventName of ["pointerdown", "keydown", "touchstart", "input", "wheel"])
+  document.addEventListener(eventName, () => network.noteActivity(), { passive: true });
 const $ = (id) => document.getElementById(id);
 if (readSetting("ads.theme") === "light") document.body.classList.add("light");
 store.addEventListener("change", () => {
@@ -21,14 +23,15 @@ store.addEventListener("change", () => {
 });
 translate();
 renderer.theme();
-function showLogin() {
+function showLogin(message = "") {
   $("login-screen").hidden = false;
   for (const element of document.querySelectorAll(
     "body > header, body > main, #dashboard, #notice",
   ))
     element.inert = true;
   ui.setUser(null);
-  $("login-form").elements.username.focus();
+  $("login-error").textContent = message ? t(message) : "";
+  const form=$("login-form");(form.dataset.owner==='true'?form.elements.password:form.elements.username).focus();
 }
 function signedIn() {
   $("login-screen").hidden = true;
@@ -45,53 +48,69 @@ $("login-form").onsubmit = async (e) => {
   const button = form.querySelector("button");
   button.disabled = true;
   try {
-    await network.login({
+    await network.login(form.dataset.owner === 'true' ? {bootstrap:form.elements.password.value} : {
       name: form.elements.username.value,
       password: form.elements.password.value,
     });
     form.elements.password.value = "";
     signedIn();
   } catch (error) {
+    if (error.message === "AUTH_STALE") return;
     console.warn("ADS_LOGIN_FAILED", error.name);
     $("login-error").textContent = t(
       error.message === "AUTH_REQUIRED"
-        ? "loginFailed"
+        ? form.dataset.owner === 'true' ? 'ownerCodeInvalid' : "loginFailed"
         : error.message === "RATE_LIMITED"
           ? "RATE_LIMITED"
+        : error.message === "SESSION_ACTIVE"
+            ? "SESSION_ACTIVE"
+          : ["HOST_TIMEOUT", "HOST_UNAVAILABLE", "HOST_BAD_RESPONSE", "INSECURE_TRANSPORT"].includes(error.message)
+            ? error.message
           : "SERVER_UNAVAILABLE",
     );
   } finally {
+    form.elements.password.value = "";
     button.disabled = false;
   }
 };
 $("logout").onclick = async () => {
+  const work = network.logout();
+  const revision = network.authRevision;
+  showLogin();
   try {
-    await network.logout();
-    showLogin();
+    await work;
   } catch (error) {
-    showLogin();
-    $("login-error").textContent = t("LOGOUT_FAILED");
+    if (revision === network.authRevision) $("login-error").textContent = t("LOGOUT_FAILED");
     console.warn("ADS_LOGOUT_FAILED", error.name);
   }
 };
-network.addEventListener("auth-expired", showLogin);
-const bootstrap = new URLSearchParams(location.hash.slice(1)).get("token");
-if (bootstrap)
-  history.replaceState(null, "", location.pathname + location.search);
+network.addEventListener("auth-expired", () => showLogin("AUTH_EXPIRED"));
+$("connection-retry").onclick = async () => {
+  if (await network.retryConnection()) signedIn();
+};
+// Retire old fragment-based links without ever using their IPC credential.
+if(location.hash.includes('token='))history.replaceState(null,"",location.pathname+location.search);
+$("owner-login-mode").onclick=()=> {
+  const form=$("login-form"),owner=form.dataset.owner!=='true';form.dataset.owner=String(owner);
+  form.elements.username.closest('label').hidden=owner;form.elements.username.required=!owner;
+  form.elements.password.value='';form.elements.password.autocomplete=owner?'one-time-code':'current-password';
+  form.elements.password.closest('label').querySelector('span').textContent=t(owner?'ownerCode':'password');
+  form.elements.password.closest('label').querySelector('span').setAttribute('data-i18n',owner?'ownerCode':'password');
+  $("owner-login-mode").textContent=t(owner?'accountLogin':'ownerLogin');
+  $("owner-login-mode").setAttribute('data-i18n',owner?'accountLogin':'ownerLogin');
+  form.elements.password.focus();
+};
 try {
-  if (bootstrap) {
-    await network.login({ bootstrap });
-    signedIn();
-  } else if (await network.me()) {
+  if (await network.me()) {
     signedIn();
     network.start();
   } else showLogin();
 } catch (error) {
   console.warn("ADS_SESSION_RESTORE_FAILED", error.name);
-  showLogin();
+  showLogin(["HOST_TIMEOUT", "HOST_UNAVAILABLE"].includes(error.message) ? error.message : "HOST_UNAVAILABLE");
 }
 setInterval(async () => {
-  if (!network.user || document.hidden) return;
+  if (!network.user || document.hidden || network.exhausted || network.retryRequest) return;
   try {
     ui.health = await network.health();
   } catch {
@@ -115,3 +134,4 @@ window.adsDiagnostics = () => ({
   connected: network.status,
   seq: store.seq.toString(),
 });
+window.dispatchEvent(new Event("ads-app-ready"));

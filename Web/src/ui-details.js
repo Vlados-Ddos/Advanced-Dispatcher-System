@@ -1,3 +1,4 @@
+import { renderJobProgress, passengerJob, passengerStops, passengerStopLabel } from "./job-progress.js";
 import { isWagon } from "./rolling-stock.js";
 import { consistService } from "./consist-service.js";
 import { tabLabel } from "./entity-search.js";
@@ -14,11 +15,13 @@ import {
 } from "./display-names.js";
 import { aspectText } from "./signal-display.js";
 import { settingsVolatile } from "./storage.js";
+import { browserResetControls } from "./browser-settings-reset.js";
 import {
   colorBadge,
   carJobAction,
   jobTypeText,
   jobTypeKey,
+  jobColorForStore,
 } from "./job-display.js";
 import { $, el, syncChildren } from "./dom.js";
 import { t, number, language } from "./localization.js";
@@ -27,7 +30,6 @@ import {
   limits,
   lodSettings,
   setPreference,
-  resetPreferences,
 } from "./preferences.js";
 import {
   jobElapsed,
@@ -97,10 +99,24 @@ export function renderDashboard(ui) {
       root.append(card);
     }
   for (const card of root.children) {
-    const value = number(values[card.dataset.metric]),
+    const metric = card.dataset.metric,
+      rawValue = Number(values[metric]) || 0,
+      value = number(rawValue),
       label = t(tabLabel(card.dataset.metric));
     if (card.firstChild.textContent !== value)
       card.firstChild.textContent = value;
+    // Keep the label neutral and colour only an actionable non-zero count.
+    // This avoids repainting/rebuilding the dashboard when train motion is
+    // streamed while still making live hazards visible at a glance.
+    const tone = rawValue > 0
+      ? ({
+          occupiedBlocks: "metric-danger",
+          stopSignals: "metric-danger",
+          activeOrders: "metric-positive",
+          warnings: "metric-warning",
+        }[metric] || "")
+      : "";
+    card.firstChild.className = tone;
     if (card.lastChild.textContent !== label)
       card.lastChild.textContent = label;
   }
@@ -265,8 +281,17 @@ export function displaySettings(ui, root) {
     setPreference("signalTooltip", e.currentTarget.checked);
   tooltipLabel.prepend(tooltip);
   groups.signalSettings.append(tooltipLabel);
+  const switchClickLabel = el("label", t("switchClick")),
+    switchClick = el("input");
+  switchClick.type = "checkbox";
+  switchClick.checked = preferences.switchClick;
+  switchClick.setAttribute("aria-label", t("switchClick"));
+  switchClick.onchange = (e) => setPreference("switchClick", e.currentTarget.checked);
+  switchClickLabel.prepend(switchClick);
+  groups.mapSettings.append(switchClickLabel);
   if (settingsVolatile())
     groups.interfaceSettings.append(el("p", t("settingsVolatile"), "warning"));
+  syncHostSettings(ui, root);
   for (const [key, [min, max]] of Object.entries(limits)) {
     const label = el("label", t(key)),
       value = el(
@@ -317,12 +342,72 @@ export function displaySettings(ui, root) {
   zoom.onchange = () => ui.renderer.saveCamera?.();
   map.append(zoom);
   groups.mapSettings.append(map);
-  ui.button(groups.interfaceSettings, "resetDisplay", () => {
-    resetPreferences();
-    ui.settings();
-  });
+  browserResetControls(groups.interfaceSettings);
   ui.button(groups.mapSettings, "fit", () => ui.renderer.fit());
   return groups;
+}
+
+// Host settings arrive with capability deltas.  Update their disabled
+// controls in place so a client never edits a stale value or loses an active
+// browser-local display control while the game is publishing state.
+function createHostSettings(hostSettings) {
+    const host = el("div", undefined, "host-settings");
+    host.dataset.hostSettings = "true";
+    host.append(el("h4", t("hostSettings")), el("p", t("hostSettingsHint")));
+    for (const [key, labelKey] of [
+      ["readOnly", "hostReadOnly"],
+      ["showUndiscovered", "hostShowUndiscovered"],
+      ["adminControls", "hostAdminControls"],
+    ]) {
+      const label = el("label", t(labelKey)),
+        input = el("input");
+      input.id = "host-" + key;
+      input.type = "checkbox";
+      input.checked = hostSettings[key] === true;
+      input.disabled = true;
+      input.dataset.authoritative = "true";
+      input.setAttribute("aria-label", t(labelKey));
+      label.prepend(input);
+      host.append(label);
+    }
+    const budgetLabel = el("label", t("hostCaptureBudgetMs")),
+      budget = el("input");
+    budget.id = "host-captureBudgetMs";
+    budget.type = "range";
+    budget.min = "0.3";
+    budget.max = "2";
+    budget.step = "0.05";
+    budget.value = Number.isFinite(Number(hostSettings.captureBudgetMs))
+      ? String(hostSettings.captureBudgetMs)
+      : "";
+    budget.disabled = true;
+    budget.dataset.authoritative = "true";
+    budget.setAttribute("aria-label", t("hostCaptureBudgetMs"));
+    budgetLabel.append(budget);
+    host.append(budgetLabel);
+    return host;
+}
+
+export function syncHostSettings(ui, root) {
+  const hostSettings = ui.store.capabilities?.hostSettings;
+  let host = root.querySelector("[data-host-settings]");
+  if (!hostSettings || typeof hostSettings !== "object") { host?.remove(); return true; }
+  if (!host) {
+    const group = root.querySelector('[data-group="dispatchSettings"]');
+    if (!group) return false;
+    host = createHostSettings(hostSettings);
+    group.append(host);
+  }
+  for (const key of ["readOnly", "showUndiscovered", "adminControls"]) {
+    const input = root.querySelector("#host-" + key);
+    if (input) input.checked = hostSettings[key] === true;
+  }
+  const budget = root.querySelector("#host-captureBudgetMs");
+  if (budget && document.activeElement !== budget)
+    budget.value = Number.isFinite(Number(hostSettings.captureBudgetMs))
+      ? String(hostSettings.captureBudgetMs)
+      : "";
+  return true;
 }
 export function jobOwnerText(job) {
   if (job.owner) return job.owner;
@@ -369,18 +454,35 @@ export function jobDetails(ui, root, job) {
   if (job.dataQuality === "stale")
     root.append(el("p", t("jobDataStale"), "warning"));
   kv("owner", jobOwnerText(job));
+  const jobActions=el("div",undefined,"actions");
+  jobActions.dataset.key="job-actions";
+  if(job.state==="Available")ui.button(jobActions,"acceptJob",()=>ui.command("acceptJob",{target:job.id}),true,job.dataQuality!=="stale");
+  if(job.active)ui.button(jobActions,"cancelJob",async()=>{
+    if(await ui.confirmAction("cancelJobPrompt","cancelJob"))await ui.command("cancelJob",{target:job.id});
+  },true,job.dataQuality!=="stale");
+  if(job.assignedPlayerKey)kv("assignedPlayer",job.assignedPlayerName || t("playerName"));
+  if(job.state==="Available") {
+    const select=el("select");select.dataset.key="assign-job-player";select.dataset.preserveValue="true";select.setAttribute("aria-label",t("assignPlayer"));
+    for(const player of ui.store.players.values())if(player.identityKey) {
+      const option=el("option",entityName(ui.store,"players",player));option.value=player.id;select.append(option);
+    }
+    if(job.assignedPlayerKey)ui.button(jobActions,"unassignJob",()=>ui.command("unassignJob",{target:job.id}),true);
+    jobActions.append(select);
+    ui.button(jobActions,"assignPlayer",()=>ui.command("assignJob",{target:job.id,action:document.querySelector('[data-key="assign-job-player"]')?.value}),true,select.options.length>0);
+  }
+  root.append(jobActions);
   const start = el("div", undefined, "kv");
   const startValue = el("span", jobStartText(job, ui.store));
   startValue.dataset.jobStart = job.id;
   start.append(el("span", t("startTime")), startValue);
   root.append(start);
+  renderJobProgress(ui, root, job);
   const wagons = el("section", undefined, "job-wagons");
   wagons.dataset.key = "job-wagons";
   wagons.append(el("h3", t("jobWagons")));
   const ids = [...new Set(job.cars || [])].filter(
     (id) => !ui.store.cars.has(id) || isWagon(ui.store.cars.get(id)),
   );
-  if (!ids.length) wagons.append(el("p", t("jobWagonsEmpty")));
   for (const id of ids) {
     const car = ui.store.cars.get(id);
     const button = el(
@@ -398,13 +500,13 @@ export function jobDetails(ui, root, job) {
         current.dataQuality !== "stale" &&
         target
       )
-        ui.pick("cars", target);
+        ui.pickNested("cars", target);
       else ui.toast(t("jobWagonUnavailable"));
     };
     wagons.append(button);
   }
-  root.append(wagons);
-  root.append(colorBadge(job));
+  if (ids.length) root.append(wagons);
+  root.append(colorBadge(job, jobColorForStore(ui.store, job)));
   if (
     job.integrationStatus &&
     !["ready", "loading"].includes(job.integrationStatus)
@@ -420,11 +522,11 @@ export function jobDetails(ui, root, job) {
       .join(", ") ||
       cargoText((job.cars || []).map((id) => ui.store.cars.get(id))),
   );
-  kv(
-    "progress",
-    `${job.tasksDone ?? 0} / ${job.tasksTotal ?? 0} ${t("tasks")}`,
-  );
   const clock = el("div", undefined, "kv");
+  const supplemental=el("details",undefined,"order-additional-details");
+  supplemental.dataset.key="order-additional-details";
+  supplemental.append(el("summary",t("orderAdditionalDetails")));
+  root.append(supplemental);root=supplemental;
   clock.append(el("span", t(job.active ? "bonusTime" : "elapsed")), timer(job));
   root.append(clock);
   kv("bonus", number(job.bonus));
@@ -435,7 +537,7 @@ export function jobDetails(ui, root, job) {
   );
   kv(
     "mass",
-    job.cars?.length ? number(job.mass, 1) + " " + t("tons") : t("unknown"),
+    job.cars?.length && job.massKnown === true ? number(job.mass, 1) + " " + t("tons") : t("massUnavailable"),
   );
   kv(
     "payment",
@@ -465,69 +567,9 @@ export function jobDetails(ui, root, job) {
     const train = ui.store.train(id);
     if (!train) continue;
     const button = el("button", entityName(ui.store, "trains", train));
-    button.onclick = () => ui.pick("trains", train);
+    button.onclick = () => ui.pickNested("trains", train);
     root.append(button);
     kv("currentLocation", trackName(ui.store, train.track1));
-  }
-  for (const route of ui.store.routes.filter((r) => trains.includes(r.train))) {
-    const button = el("button", entityName(ui.store, "routes", route));
-    button.onclick = () => ui.pick("routes", route);
-    root.append(button);
-  }
-  for (const [index, leg] of (job.legs || []).entries()) {
-    const task = el("div", undefined, "task-card");
-    task.dataset.key = "task-" + index;
-    task.append(
-      el(
-        "strong",
-        localizedValue(leg.type, "taskTypeUnavailable") +
-          " · " +
-          localizedValue(leg.state),
-      ),
-      el(
-        "p",
-        [
-          leg.fromTrack
-            ? trackName(ui.store, leg.fromTrack)
-            : leg.from
-              ? locationName(ui.store, leg.from)
-              : "",
-          leg.toTrack
-            ? trackName(ui.store, leg.toTrack)
-            : leg.to
-              ? locationName(ui.store, leg.to)
-              : "",
-        ]
-          .filter(Boolean)
-          .join(" → "),
-      ),
-    );
-    if (leg.station) {
-      const location = ui.location(leg.station);
-      const button = ui.button(
-        task,
-        "showStop",
-        () => {
-          if (location) ui.pick("locations", location);
-        },
-        false,
-        !!location,
-      );
-      button.title = locationName(ui.store, location || leg.station);
-    }
-    if (leg.cars?.length) task.append(el("small", leg.cars.join(", ")));
-    if (leg.couplingRequired) task.append(el("p", t("couplingRequired")));
-    if (leg.handbrakeRequired) task.append(el("p", t("handbrakeRequired")));
-    if (leg.toTrack && job.dataQuality !== "stale")
-      ui.button(task, "routeToTask", () => {
-        ui.startTrain = trains[0] || null;
-        ui.startTrack = ui.store.train(ui.startTrain)?.track1 || leg.fromTrack;
-        ui.endTrack = leg.toTrack;
-        ui.routeVia = [];
-        ui.routeWaypointPicking = false;
-        ui.previewRoute();
-      });
-    root.append(task);
   }
   root.append(el("h3", t("eventHistory")));
   for (const event of ui.store.events
@@ -646,20 +688,79 @@ export function routeDetails(ui, root, route, scope = "inspector") {
     return;
   }
   if (selected === "details") {
-    routeMode(ui, root, route);
-    ui.kv(root, "from", trackName(ui.store, route.from));
-    ui.kv(root, "destination", trackName(ui.store, route.to));
-    if (route.via?.length)
-      ui.kv(
-        root,
-        "routeWaypoints",
-        route.via.map((id) => trackName(ui.store, id)).join(" → "),
-      );
+    const status = el("section", undefined, "detail-section detail-status");
+    status.append(el("h3", t("status")));
+    routeMode(ui, status, route);
+    root.append(status);
+    const routeInfo = el("section", undefined, "detail-section detail-main");
+    routeInfo.append(el("h3", t("routeDetails")));
+    const linkedOrder=ui.store.jobs.get(route.jobId);
+    const stops=linkedOrder&&passengerJob(linkedOrder)?passengerStops(linkedOrder):[];
+    const pointName=id=>{
+      const stop=stops.find(s=>s.track===id);
+      return stop?passengerStopLabel(ui.store,stop):trackName(ui.store,id);
+    };
+    ui.kv(routeInfo, "from", pointName(route.from));
+    ui.kv(routeInfo, "destination", pointName(route.to));
+    const manual=!route.jobId || !stops.length ? (route.via||[]) : (route.via||[]).filter(id=>route.manualVia?.includes(id)||!stops.some(stop=>stop.track===id));
+    const mandatory=(route.via||[]).filter(id=>!manual.includes(id));
+    if(mandatory.length)ui.kv(routeInfo,'orderRequiredStops',mandatory.map(pointName).join(' → '));
+    if(manual.length)ui.kv(routeInfo,'manualRouteWaypoints',manual.map(id=>trackName(ui.store,id)).join(' → '));
+    if (route.id && !route.endedAt && !["preview", "replacing", "unconfirmed", "recalculating"].includes(route.recalculationState))
+      ui.button(routeInfo, route.jobId ? "addRouteWaypoint" : "editRoutePoints", () => ui.beginRouteEdit(route));
+    if (route.jobId) {
+      const job = ui.store.jobs.get(route.jobId);
+      ui.kv(routeInfo, "job", job ? entityName(ui.store, "jobs", job) : route.jobId);
+      if (route.taskIndex >= 0) ui.kv(routeInfo, "task", number(route.taskIndex + 1));
+      if (job) {
+        const orderProgress = el("section", undefined, "detail-section order-route-progress");
+        orderProgress.dataset.key = "order-route-progress";
+        renderJobProgress(ui, orderProgress, job, false);
+        root.append(orderProgress);
+      }
+    }
     ui.kv(
-      root,
+      routeInfo,
       "remainingDistance",
       number(route.remaining ?? route.length) + " " + t("meters"),
     );
+    // Native signal blocks are released as the consist tail clears them.
+    // Keep the original ordered route for history and expose the live
+    // completed/current/pending sections separately so route details mirrors
+    // the reservation footprint instead of pretending the whole path is
+    // still held.
+    const orderedTracks = Array.isArray(route.tracks) ? route.tracks : [];
+    const releasedTracks = new Set(route.releasedTracks || []);
+    const completedTracks = orderedTracks.filter((id) => releasedTracks.has(id));
+    const pendingTracks = orderedTracks.filter((id) => !releasedTracks.has(id));
+    const disclosureState = ui.routeSegmentDisclosure ||
+      (ui.routeSegmentDisclosure = new Map());
+    const appendSegmentDisclosure = (key, label, tracks) => {
+      if (!tracks.length) return;
+      const details = el("details", undefined, "route-segment-disclosure");
+      details.dataset.key = "route-segments-" + key;
+      const stateKey = tabKey + ":" + key;
+      const domId =
+        "route-segments-list-" +
+        String(stateKey).replace(/[^a-zA-Z0-9_-]/g, "-");
+      const summary = el(
+        "summary",
+        t(label) + " · " + number(tracks.length),
+      );
+      summary.setAttribute("aria-controls", domId);
+      const list = el("ol", undefined, "route-segment-list");
+      list.id = domId;
+      for (const id of tracks) list.append(el("li", trackName(ui.store, id)));
+      details.append(summary, list);
+      details.open = disclosureState.get(stateKey) === true;
+      details.ontoggle = () => disclosureState.set(stateKey, details.open);
+      routeInfo.append(details);
+    };
+    appendSegmentDisclosure("completed", "routeCompletedSegments", completedTracks);
+    if (pendingTracks.length)
+      ui.kv(routeInfo, "routeCurrentSegment", trackName(ui.store, pendingTracks[0]));
+    appendSegmentDisclosure("pending", "routePendingSegments", pendingTracks.slice(1));
+    root.append(routeInfo);
     return;
   }
   const list = el("ol", undefined, "itinerary");
@@ -699,6 +800,20 @@ export function routeDetails(ui, root, route, scope = "inspector") {
     root.append(navigation);
   }
   list.setAttribute("start", String(page * pageSize + 1));
+  if (route.staged && route.stages?.length) {
+    const stages = el("section", undefined, "detail-section staged-sequence");
+    stages.dataset.key = "staged-sequence";
+    stages.append(el("h3", t("stagedRoute")));
+    const stageList = el("ol");
+    for (const [index, stage] of route.stages.entries()) {
+      const row = el("li", undefined, "stage-row stage-" + stage.status);
+      row.dataset.key = "route-stage-" + index;
+      row.append(el("strong", `${t("stage")} ${number(index + 1)}`), el("span", `${trackName(ui.store, stage.from)} → ${trackName(ui.store, stage.to)}`), el("small", t("stage_" + stage.status)));
+      stageList.append(row);
+    }
+    stages.append(stageList);
+    root.append(stages);
+  }
   for (const [localIndex, point] of points
     .slice(page * pageSize, (page + 1) * pageSize)
     .entries()) {
@@ -708,9 +823,10 @@ export function routeDetails(ui, root, route, scope = "inspector") {
       button = el("button");
     row.dataset.key = "point-" + index + ":" + point.kind + ":" + point.id;
     button.textContent = `${point.current ? t("currentBlock") : t(point.kind)} · ${entityName(ui.store, point.kind, item || point.id)} · ${number(point.distance)} ${t("meters")}`;
+    if(point.boundary)button.textContent += " · " + t("signalBeyondDestination");
     button.onclick = () => {
       const current = ui.renderer.resolve({ kind: point.kind, id: point.id });
-      if (current) ui.pick(point.kind, current);
+      if (current) ui.pickNested(point.kind, current);
     };
     button.disabled = !item;
     row.append(button);
@@ -721,7 +837,7 @@ export function routeDetails(ui, root, route, scope = "inspector") {
           aspectText(item) + " · " + t(item.reserved ? "reserved" : "none"),
         ),
       );
-      if (ui.store.capabilities.signalCommands && !route.endedAt)
+      if (ui.store.capabilities.signalCommands && !route.endedAt && !point.boundary)
         ui.button(
           row,
           item.reserved ? "cancelSignal" : "reserveSignal",
@@ -758,16 +874,11 @@ export function extraInspector(ui, root, actions, kind, item) {
   const kv = (k, v) => ui.kv(root, k, v),
     s = ui.store;
   if (kind === "trains" || kind === "cars" || kind === "wagonGroups") {
+    if (item.availability && item.availability !== "available")
+      kv("availability", t(item.availability));
     if (item.locomotive || kind === "trains") {
       const car = kind === "trains" ? s.cars.get(item.head) : item;
       const service = consistService(s, car);
-      if (kind === "cars")
-        kv(
-          "consistLength",
-          service.length === null
-            ? t("lengthUnavailable")
-            : number(service.length, 1) + " " + t("meters"),
-        );
       const section = el("section", undefined, "consist-jobs");
       section.dataset.key = "consist-jobs";
       section.append(el("h3", t("consistJobs")));
@@ -778,7 +889,7 @@ export function extraInspector(ui, root, actions, kind, item) {
           const current = consistService(s, s.cars.get(car?.id)).jobs.find(
             (j) => j.id === job.id,
           );
-          if (current) ui.pick("jobs", current);
+          if (current) ui.pickNested("jobs", current);
         };
         section.append(button);
       }
@@ -829,13 +940,7 @@ export function extraInspector(ui, root, actions, kind, item) {
     const limit = speedAt(item, s);
     kv("speedLimits", limit === null ? t("unknown") : limit + " " + t("kmh"));
     ui.button(actions, "routeFromTrain", () => {
-      ui.startTrain = trainId;
-      ui.startTrack = item.track1;
-      ui.endTrack = null;
-      ui.routeVia = [];
-      ui.routeWaypointPicking = false;
-      s.preview = null;
-      ui.renderRoute();
+      ui.beginRoute(item.track1,trainId);
     });
     carJobAction(ui, actions, carIds);
   }
@@ -899,6 +1004,7 @@ export function extraInspector(ui, root, actions, kind, item) {
         )
         .join(", "),
     );
+    if ((item.extraTracks || []).length) kv("nativeProtection", t("nativeProtection"));
   }
   if (kind === "switches") {
     kv(

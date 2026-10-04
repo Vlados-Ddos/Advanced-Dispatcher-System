@@ -13,6 +13,12 @@ namespace AdvancedDispatcherSystem.Game
         private static readonly Dictionary<TrainCarLivery, string> colors = new Dictionary<TrainCarLivery, string>();
         private static string language;
         private static readonly Dictionary<string, string> names = new Dictionary<string, string>();
+        public static string CatalogModel(TrainCarLivery livery)
+        {
+            if (livery == null) return null;
+            CataloguePalette.Models.TryGetValue(livery.id + "|" + livery.localizationKey, out var model);
+            return model;
+        }
         public static string CatalogColor(TrainCarLivery livery)
         {
             if (livery == null) return null;

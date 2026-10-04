@@ -45,19 +45,24 @@ export function locationName(store, value) {
     item.parent && item.parent !== item.id
       ? locationRecord(store, item.parent)
       : null;
-  const base = usableName(parent?.name) ? parent.name : null;
+  const localized = record => {
+    const value=language()==="ru"?record?.nameRu:record?.nameEn;
+    return usableName(value)?value:record?.name;
+  };
+  const name=localized(item),parentName=localized(parent);
+  const base = usableName(parentName) ? parentName : null;
   if (item.type === "passengerPlatform") {
     const code =
-      platformCode(item.platformLabel) ||
+      (usableName(item.platformLabel) ? item.platformLabel : null) ||
       platformCode(item.platform || item.id?.replace(/^pj:platform:/, ""));
     return [
       t("platformName") + (code ? " " + code : ""),
-      base || (humanName(item.name) ? item.name : null),
+      base || (humanName(name) ? name : null),
     ]
       .filter(Boolean)
       .join(" · ");
   }
-  if (humanName(item.name)) return item.name;
+  if (humanName(name)) return name;
   if (base) return base + " · " + t("passengerStopName");
   const code = item.code || /^(?:pj:)?([A-Z]{1,6})$/.exec(item.id || "")?.[1];
   return [
@@ -216,16 +221,21 @@ export function entityName(store, kind, value) {
   if (kind === "blocks" && item.source === "dispatch")
     return t("section") + " · " + trackName(store, item.tracks?.[0] || item);
   if (kind === "log") return localizedValue(item.code, "eventRecorded");
+  if(kind==="routes" && item.passengerRoute) {
+    const job=store?.jobs?.get(item.jobId);
+    const leg=job?.legs?.find(l=>l.passengerStop&&l.toTrack===item.to);
+    const stop=locationRecord(store,leg?.station)||[...(store?.locations?.values()||[])].find(s=>s.passenger&&s.tracks?.includes(item.to));
+    const destination=stop?locationName(store,stop)+(stop.code?" ["+stop.code+"]":""):t("passengerStopName");
+    return trackName(store,item.from)+" → "+destination;
+  }
   if (
     kind === "routes" &&
     item.from &&
     item.to &&
-    /\[Y\]|\[track |^t\d+.*→|pj:/.test(item.name || "")
+    /\[Y\]|\[track |^t\d+.*→|pj:|^(?:Consist|Train|Состав)\s+[\d\s,.\u00a0\u202f]+\s*→|^train:-?\d+.*→/i.test(item.name || "")
   )
     return (
-      (item.train
-        ? entityName(store, "trains", item.train)
-        : trackName(store, item.from)) +
+      trackName(store, item.from) +
       " → " +
       trackName(store, item.to)
     );

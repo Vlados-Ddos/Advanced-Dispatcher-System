@@ -71,7 +71,11 @@ namespace AdvancedDispatcherSystem.Game
             {
                 var car = item.car; if (car == null) continue;
                 var p = car.transform.TransformPoint(car.Bounds.center) - WorldMover.currentMove;
-                observed.Add(new CarState { x = p.x, z = p.z, speed = car.GetForwardSpeed() * 3.6, length = car.InterCouplerDistance, track1 = TrackId(car.FrontBogie?.track), track2 = TrackId(car.RearBogie?.track) });
+                // TrainCar.Bounds is local collision geometry (the game's
+                // placement code projects Bounds.center.z along transform.forward).
+                // Transform the centre once and keep its local X width.
+                var width = car.Bounds.size.x;
+                observed.Add(new CarState { x = p.x, z = p.z, yaw = car.transform.eulerAngles.y, width = width, speed = car.GetForwardSpeed() * 3.6, length = car.InterCouplerDistance, track1 = TrackId(car.FrontBogie?.track), track2 = TrackId(car.RearBogie?.track) });
             }
             return TurntableRules.Safety(entry.def.radius, observed, entry.def.x, entry.def.z, entry.def.track);
         }

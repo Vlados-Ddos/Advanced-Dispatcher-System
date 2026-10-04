@@ -1,4 +1,8 @@
+import { accountSettings } from "./account-settings.js";
 import { matchesSearch, normalizeSearch, tabLabel } from "./entity-search.js";
+import { consistService } from "./consist-service.js";
+import { pointsFocus } from "./object-focus.js";
+import { mapViewport } from "./map-viewport.js";
 import { wagonRows, wagonGroupSummary } from "./wagon-groups.js";
 import {
   isWagon,
@@ -6,8 +10,10 @@ import {
   trainDescription,
   vehicleHeading,
 } from "./rolling-stock.js";
+import { routeTime } from "./route-time.js";
+import { duration } from "./operations.js";
 import { previewWarnings } from "./route-preview.js";
-import { uiIcon } from "./ui-icons.js";
+import { uiIcon, locomotiveIcon } from "./ui-icons.js";
 import { groupedJobs } from "./job-groups.js";
 import { renderEvent } from "./event-details.js";
 import { jobIcon } from "./job-icons.js";
@@ -16,12 +22,16 @@ import { renderSignalControls } from "./signal-controls.js";
 import { countText } from "./localization.js";
 import { isSignal, railwaySigns } from "./railway-objects.js";
 import { saveSetting } from "./storage.js";
+import { preferences } from "./preferences.js";
 import {
   jobColor,
   colorLegend,
   jobTypeText,
   jobTypeKey,
   primaryJob,
+  carJobVisual,
+  neutralJobColor,
+  jobColorForStore,
 } from "./job-display.js";
 import { allLocations, renderLocations, locationDetails } from "./locations.js";
 import { renderLayers, saveLayers } from "./layers.js";
@@ -56,10 +66,16 @@ import {
   activeOrders,
   renderFilters,
   displaySettings,
+  syncHostSettings,
   jobDetails,
   routeDetails,
   extraInspector,
 } from "./ui-details.js";
+import { passengerJob, passengerStops, passengerStopLabel } from "./job-progress.js";
+import { detailsBack } from "./details-navigation.js";
+import { locomotiveLoadRating } from "./locomotive-catalog.js";
+import { tractionAssessment } from "./traction-assessment.js";
+import { weatherState, weatherLabelKey, weatherIconKey, weatherMeasurements, formatGameTime } from "./weather.js";
 export class UI {
   constructor(store, network, renderer) {
     this.store = store;
@@ -68,13 +84,19 @@ export class UI {
     this.tab = "trains";
     this.query = "";
     this.selected = null;
+    this.navigationStack = [];
     this.items = [];
     this.dirty = true;
     this.lastList = 0;
     this.startTrack = null;
     this.endTrack = null;
     this.routeVia = [];
-    this.routeWaypointPicking = false;
+    this.avoidForeignReservations = true;
+    this.routeJobId = null;
+    this.routeTaskIndex = -1;
+    this.routeTaskId = null;
+    this.routeEditingId = null;
+    this.requiredRouteVia = [];
     this.user = null;
     this.health = null;
     this.signalFilter = "all";
@@ -82,8 +104,44 @@ export class UI {
     this.tabFilters = new Map();
     this.pendingCommands = 0;
     this.planningError = null;
+    this.autoRouteNotices = new Set();
+    this.autoRouteToasts = new Map();
+    this.jobProgressSeen = new Map();
+    this.renderer.onSwitchClick = (item) => this.toggleSwitchFromMap(item);
     this.bind();
     setInterval(() => this.refresh(), 250);
+  }
+  mobileViewport() {
+    return globalThis.matchMedia?.("(max-width: 720px), (max-width: 900px) and (max-height: 600px)").matches === true;
+  }
+  renderMobileNavigation() {
+    const root = $("mobile-nav"), more = $("mobile-more-items");
+    if (!root || !more) return;
+    root.replaceChildren();
+    more.replaceChildren();
+    const add = (parent, key, labelKey = key) => {
+      const button = el("button", undefined, "mobile-nav-button");
+      button.type = "button";
+      button.dataset.tab = key;
+      const icon = el("span", undefined, "mobile-nav-icon");
+      icon.append(uiIcon(key));
+      button.append(icon, el("span", t(labelKey), "mobile-nav-label"));
+      button.setAttribute("aria-label", t(labelKey));
+      parent.append(button);
+      return button;
+    };
+    add(root, "map", "mobileMap");
+    for (const key of ["routes", "trains", "jobs"]) add(root, key);
+    const moreButton = add(root, "more", "mobileMore");
+    moreButton.classList.add("mobile-more-trigger");
+    const primary = new Set(["routes", "trains", "jobs"]);
+    const moreTabs = ["locations", "cars", "signals", "switches", "turntables", "blocks", "players", "tracks", "signs", "weather", "log", "settings"];
+    for (const key of moreTabs)
+      if (!primary.has(key)) add(more, key);
+    for (const button of root.children)
+      button.classList.toggle("active", button.dataset.tab === this.tab);
+    for (const button of more.children)
+      button.classList.toggle("active", button.dataset.tab === this.tab);
   }
   bind() {
     for (const key of [
@@ -96,6 +154,7 @@ export class UI {
       "blocks",
       "routes",
       "jobs",
+      "weather",
       "players",
       "tracks",
       "signs",
@@ -112,6 +171,95 @@ export class UI {
       button.addEventListener("click", () => this.setTab(key));
       $("tabs").append(button);
     }
+    this.renderMobileNavigation();
+    // Keep the mobile controls event delegated to the stable nav element. It
+    // survives language refreshes and DOM replacement of the button list.
+    $("mobile-nav")?.addEventListener("click", (event) => {
+      const button = event.target.closest?.("button[data-tab]");
+      if (!button) return;
+      const key = button.dataset.tab;
+      if (key === "more") {
+        const panel = $("mobile-more");
+        panel.hidden = !panel.hidden;
+        document.body.classList.toggle("mobile-more-open", !panel.hidden);
+        if (!panel.hidden) $("mobile-more-close")?.focus();
+      } else if (key === "map") {
+        document.body.classList.remove("mobile-list-open", "mobile-sheet-open");
+        document.body.classList.add('mobile-map-only');
+        this.renderer.cancelPan?.();
+        this.renderer.resize?.();
+      } else this.setTab(key);
+    });
+    $("mobile-more-items")?.addEventListener("click", (event) => {
+      const button = event.target.closest?.("button[data-tab]");
+      if (!button) return;
+      this.setTab(button.dataset.tab);
+      $("mobile-more").hidden = true;
+      document.body.classList.remove("mobile-more-open");
+    });
+    window.addEventListener("ads-language", () => this.renderMobileNavigation());
+    $("mobile-more-close")?.addEventListener("click", () => {
+      $("mobile-more").hidden = true;
+      document.body.classList.remove("mobile-more-open");
+    });
+    const sheetToggle = $("mobile-sheet-toggle"), sheetFrame = $("inspector-frame");
+    let sheetDrag = null, suppressSheetClick = false;
+    const setSheetOffset = (offset) => {
+      if (sheetFrame) sheetFrame.style.setProperty("--mobile-sheet-offset", `${Math.max(0, offset)}px`);
+    };
+    const syncSheetState = () => {
+      sheetToggle?.setAttribute("aria-expanded", String(!document.body.classList.contains("mobile-sheet-collapsed")));
+    };
+    const endSheetDrag = (event) => {
+      if (!sheetDrag || (event && event.pointerId !== sheetDrag.id)) return;
+      const drag = sheetDrag;
+      sheetDrag = null;
+      if (sheetToggle?.hasPointerCapture?.(drag.id)) sheetToggle.releasePointerCapture(drag.id);
+      sheetToggle?.classList.remove("dragging");
+      setSheetOffset(0);
+      if (!drag.moved) return;
+      suppressSheetClick = true;
+      const dy = (event?.clientY ?? drag.lastY) - drag.startY;
+      if (dy > Math.max(72, (sheetFrame?.clientHeight || 300) * .18))
+        document.body.classList.add("mobile-sheet-collapsed");
+      else if (dy < -36)
+        document.body.classList.remove("mobile-sheet-collapsed");
+      syncSheetState();
+    };
+    sheetToggle?.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 && event.pointerType !== "touch") return;
+      sheetDrag = { id: event.pointerId, startY: event.clientY, lastY: event.clientY, moved: false };
+      suppressSheetClick = false;
+      sheetToggle.classList.add("dragging");
+      sheetToggle.setPointerCapture?.(event.pointerId);
+      event.preventDefault();
+    });
+    sheetToggle?.addEventListener("pointermove", (event) => {
+      if (!sheetDrag || event.pointerId !== sheetDrag.id) return;
+      const dy = event.clientY - sheetDrag.startY;
+      sheetDrag.lastY = event.clientY;
+      if (Math.abs(dy) <= 4) return;
+      sheetDrag.moved = true;
+      if (dy < -8) document.body.classList.remove("mobile-sheet-collapsed");
+      setSheetOffset(Math.max(0, dy));
+      event.preventDefault();
+    });
+    for (const eventName of ["pointerup", "pointercancel", "lostpointercapture"])
+      sheetToggle?.addEventListener(eventName, endSheetDrag);
+    sheetToggle?.addEventListener("click", () => {
+      if (suppressSheetClick) { suppressSheetClick = false; return; }
+      document.body.classList.toggle("mobile-sheet-collapsed");
+      syncSheetState();
+    });
+    const updateMobileLabels = () => $("mobile-sheet-toggle")?.setAttribute("aria-label", t("toggleDetails"));
+    updateMobileLabels();
+    window.addEventListener("ads-language", updateMobileLabels);
+    $("mobile-more")?.addEventListener("click", (event) => {
+      if (event.target === $("mobile-more")) {
+        $("mobile-more").hidden = true;
+        document.body.classList.remove("mobile-more-open");
+      }
+    });
     $("search").addEventListener("input", (e) => {
       this.query = normalizeSearch(e.target.value);
       this.wagonSearchCollapsed?.clear();
@@ -132,18 +280,22 @@ export class UI {
     $("fit").onclick = () => this.renderer.fit();
     $("home-player").onclick = () => {
       const players = [...this.store.players.values()].map((p) =>
-        this.renderer.store.playerPosition(p, this.renderer.frameTime),
+        this.store.playerPosition(p, this.renderer.frameTime),
       );
-      if (players.length)
-        this.renderer.center(
-          players.reduce((n, p) => n + p.x, 0) / players.length,
-          players.reduce((n, p) => n + p.z, 0) / players.length,
-          0.3,
-        );
+      const target=pointsFocus(this.renderer,players.map(p=>[p.x,p.z]));
+      if(target) {
+        const area=mapViewport(this.renderer);
+        this.renderer.scale=target.zoom;
+        this.renderer.center(target.x-(area.left+area.width/2-this.renderer.width/2)/target.zoom,target.z);
+      }
+      this.syncTrackingControls();
     };
     $("follow").onclick = () => {
-      this.renderer.follow = this.renderer.follow ? null : this.selected;
-      $("follow").classList.toggle("active", !!this.renderer.follow);
+      const moving=item=>["cars","trains","wagonGroups","players"].includes(item?.kind);
+      const active=this.renderer.follow|| (moving(this.renderer.cameraFocus?.item)&&this.renderer.cameraFocus.item);
+      this.renderer.cameraFocus=null;
+      this.renderer.follow=active?null:moving(this.selected)?this.selected:null;
+      this.syncTrackingControls();
     };
     $("zoom-in").onclick = () => this.renderer.zoom(1.4);
     $("zoom-out").onclick = () => this.renderer.zoom(1 / 1.4);
@@ -175,6 +327,7 @@ export class UI {
       $("metrics").hidden = !$("metrics").hidden;
     };
     this.renderer.addEventListener("select", (e) => {
+      if (!this.detailNavigation) this.navigationStack = [];
       if (
         this.selected?.id !== e.detail?.id ||
         this.selected?.kind !== e.detail?.kind
@@ -183,22 +336,22 @@ export class UI {
         this.signalModeDraft = null;
       }
       this.selected = e.detail;
+      if (this.mobileViewport() && this.selected) {
+        document.body.classList.remove('mobile-map-only');
+        document.body.classList.remove("mobile-list-open", "mobile-sheet-collapsed");
+        document.body.classList.add("mobile-sheet-open");
+      }
+      this.syncTrackingControls();
       if (this.selected?.kind === "routes" && this.startTrack) {
         this.store.preview = null;
         this.startTrack = this.endTrack = this.startTrain = null;
         this.routeVia = [];
-        this.routeWaypointPicking = false;
+        this.routeJobId = null;
+        this.routeTaskIndex = -1;
+        this.routeTaskId = null;
+        this.routeEditingId = null;
+        this.requiredRouteVia = [];
         this.renderRoute();
-      }
-      if (
-        this.routeWaypointPicking &&
-        e.detail?.kind === "tracks" &&
-        this.startTrack &&
-        this.endTrack
-      ) {
-        this.routeWaypointPicking = false;
-        this.addWaypoint(e.detail.id);
-        return;
       }
       this.renderInspector();
       this.renderRows();
@@ -208,9 +361,11 @@ export class UI {
       this.renderInspector();
       this.layers();
     });
+    this.renderer.addEventListener("tracking",()=>this.syncTrackingControls());
     $("exit-route-focus").onclick = () => this.renderer.clearRouteFocus();
     this.store.addEventListener("change", (e) => {
       const { kind, payload: p } = e.detail;
+      if (this.tab === "weather" && (kind === "capabilities" || kind === "snapshot" || kind === "delta" && p.capabilities)) { this.collect(); this.renderRows(); }
       if (["routes", "snapshot", "topology"].includes(kind))
         this.selectPlannedRoute();
       if (
@@ -247,6 +402,35 @@ export class UI {
         const node = this.toast(jobEventContent(this, p));
         node.jobEvent = p;
       }
+      if (kind === "snapshot" || kind === "delta" && (p.jobs?.length || p.replaceJobs)) {
+        for (const job of this.store.jobs.values()) {
+          const previous = this.jobProgressSeen.get(job.id);
+          const current = (job.legs || []).map(leg => leg.progress || "unknown");
+          if (previous && passengerJob(job)) {
+            for (let i = 0; i < current.length; i++) {
+              if (previous[i] === "completed" || current[i] !== "completed") continue;
+              const leg = job.legs[i];
+              if (!leg?.passengerStop) continue;
+              const stop = passengerStops(job).find(item => item.legs.includes(leg));
+              const label = stop ? passengerStopLabel(this.store, stop) : leg.station || leg.toTrack;
+              const next = passengerStops(job).find(item => item.progress === "active" || item.progress === "pending");
+              let message = t("passengerStopCompleted").replace("{stop}", label);
+              if (next) message += " " + t("passengerNextStop").replace("{stop}", passengerStopLabel(this.store, next));
+              this.toast(message);
+            }
+          }
+          this.jobProgressSeen.set(job.id, current);
+        }
+        const selectedJob = this.selected?.kind === "jobs"
+          ? this.store.jobs.get(this.selected.id)
+          : null;
+        if (
+          this.selected?.kind === "jobs" &&
+          !selectedJob
+        )
+          this.renderer.select(null);
+      }
+      if (kind === "routes" || kind === "snapshot") this.handleAutomaticRouteUpdate();
       if (kind === "routes") {
         const selectedRoute =
           this.selected?.kind === "routes" &&
@@ -348,7 +532,11 @@ export class UI {
       ) {
         this.startTrack = this.endTrack = this.startTrain = null;
         this.routeVia = [];
-        this.routeWaypointPicking = false;
+        this.routeJobId = null;
+        this.routeTaskIndex = -1;
+        this.routeTaskId = null;
+        this.routeEditingId = null;
+        this.requiredRouteVia = [];
         this.clearRoutePreview();
         this.renderRoute();
       }
@@ -364,8 +552,14 @@ export class UI {
             this.startTrack &&
             this.endTrack))
       )
+        // Keep the last confirmed preview visible while the replacement
+        // request is in flight. Clearing it here caused a one-frame blank
+        // route on every signal/block delta (most noticeable with shunting
+        // heads, which can update independently of the route reservation).
+        // Let the in-flight request notice the changed key and chain one
+        // replacement request; restarting it for every frame defeats that
+        // coalescing and creates its own visible churn.
         if (this.previewPending && !this.store.disconnected) {
-          this.store.preview = null;
           this.renderer.overlayDirty = true;
           this.renderRoute();
         } else this.previewRoute();
@@ -403,12 +597,76 @@ export class UI {
       if (this.tab === "settings") this.settings();
     });
     this.layers();
-    this.setTab("trains");
+    this.setTab("trains", { mobileInitial: true });
+  }
+  handleAutomaticRouteUpdate() {
+    const activeNotices = new Set(), notifyingRoutes = new Set();
+    const pathKey = (path) => JSON.stringify([
+      path?.tracks || [], path?.directions || [],
+      (path?.switches || []).map(s => [s.id, s.branch]).sort((a,b)=>String(a[0]).localeCompare(String(b[0]))),
+      (path?.turntables || []).map(s => [s.id,s.from,s.to,s.fromEnd,s.toEnd,s.position]),
+    ]);
+    const attention = this.autoRouteAttention ||= new Map();
+    for (const route of this.store.routes || []) {
+      if (route.endedAt) continue;
+      const state = route.recalculationState;
+      const stageAvailable = route.staged && route.stageStatus === "available";
+      const failure = state === "failed" || state === "unconfirmed";
+      if (!failure && !stageAvailable && !["available", "recalculating", "preview", "replacing"].includes(state)) continue;
+      const affectedTrack = route.editPreview?.affectedTrack || route.conflicts?.find((c) => c.track)?.track || (stageAvailable ? route.activeTo : null);
+      const messageKey = stageAvailable ? "stagedLegAvailable" : failure ? route.reason || "ROUTE_RECALCULATION_FAILED"
+        : state === "available" ? "AUTO_ROUTE_RECALCULATION_AVAILABLE"
+        : state === "preview" ? "AUTO_ROUTE_RECALCULATING"
+        : state === "replacing" ? "confirmingRouteEdit" : "AUTO_ROUTE_RECALCULATION_STARTED";
+      const key = JSON.stringify([route.id, state, route.editPreview?.id, route.reason, route.invalidationReason, affectedTrack]);
+      activeNotices.add(key);
+      notifyingRoutes.add(route.id);
+      const message = [t(messageKey), entityName(this.store, "routes", route),
+        !failure && route.invalidationReason ? t(route.invalidationReason) : null,
+        affectedTrack ? trackName(this.store, affectedTrack) : null,
+        stageAvailable && route.activeFrom && route.activeTo ? `${trackName(this.store, route.activeFrom)} → ${trackName(this.store, route.activeTo)}` : null].filter(Boolean).join(" · ");
+      const previous = this.autoRouteToasts.get(route.id);
+      if (previous?.isConnected) {
+        if (previous.textContent !== message) previous.textContent = message;
+        previous.classList.toggle("error", failure);
+      } else if (!this.autoRouteNotices.has(key)) {
+        this.autoRouteToasts.set(route.id, this.toast(message, failure));
+      }
+      // A signal/reservation/occupancy update can change the warning track or
+      // timestamp while the planned geometry remains identical.  Such a
+      // state refresh must never move the operator's camera.  Focus only when
+      // a staged leg becomes available or a recalculation preview contains a
+      // genuinely different oriented path.
+      const geometryChanged = state === "preview" && route.editPreview?.tracks?.length &&
+        pathKey(route) !== pathKey(route.editPreview);
+      const attentionKey = stageAvailable ? JSON.stringify(["stage", route.stageIndex, route.activeFrom, route.activeTo])
+        : geometryChanged ? pathKey(route.editPreview) : null;
+      if (attentionKey && affectedTrack && attention.get(route.id) !== attentionKey) {
+        const points = this.store.tracks.get(affectedTrack)?.points;
+        if (points?.length >= 4) {
+          let x = 0, z = 0;
+          for (let i = 0; i < points.length; i += 2) { x += points[i]; z += points[i + 1]; }
+          this.renderer.center(x / (points.length / 2), z / (points.length / 2));
+          attention.set(route.id, attentionKey);
+        }
+      }
+    }
+    this.autoRouteNotices = activeNotices;
+    const liveRoutes = new Set((this.store.routes || []).filter(r => !r.endedAt).map(r => r.id));
+    for (const id of attention.keys()) if (!liveRoutes.has(id)) attention.delete(id);
+    // Both failure and preview notices belong to the route's current state.
+    // Retire their actual DOM nodes immediately after authoritative recovery.
+    for (const [id, node] of this.autoRouteToasts) if (!notifyingRoutes.has(id)) {
+      node?.remove?.();
+      this.autoRouteToasts.delete(id);
+    }
   }
   connection(status) {
     $("connection").className =
       "connection " + (status === "connected" ? "live" : "offline");
     $("connection").lastElementChild.textContent = t(status);
+    const retry = $("connection-retry");
+    if (retry) retry.hidden = status !== "reconnectFailed";
   }
   setUser(user) {
     this.user = user;
@@ -422,6 +680,13 @@ export class UI {
   }
   setTab(tab, options = {}) {
     this.renderer.cancelPan?.();
+    if (this.tab === "weather" && tab !== "weather") {
+      // A collapsed tablet/mobile list can have a zero-height viewport, so
+      // virtual-list rendering deliberately waits. Dispose Weather on the
+      // navigation transition itself instead of waiting for that rendering.
+      $("object-list").replaceChildren();
+      this.listSurface=null;this.listWindow=null;this.rowRender=null;
+    }
     this.tabQueries.set(this.tab, this.query);
     this.tabFilters.set(this.tab, {
       status: $("status-filter").value,
@@ -434,8 +699,12 @@ export class UI {
     this.query = normalizeSearch(this.query);
     $("search").value = this.query;
     this.tab = tab;
-    this.renderer.trackPicking = tab === "tracks" || !!this.startTrack;
     document.body.classList.remove("collapsed");
+    if (this.mobileViewport() && !options.mobileInitial) {
+      document.body.classList.remove('mobile-map-only');
+      document.body.classList.add("mobile-list-open");
+      document.body.classList.remove("mobile-sheet-open", "mobile-sheet-collapsed");
+    }
     $("panel-heading").textContent = t(tabLabel(tab));
     $("panel-heading").removeAttribute("data-i18n");
     if (changed) $("active-only").checked = false;
@@ -444,8 +713,9 @@ export class UI {
       b.classList.toggle("active", b.dataset.tab === tab);
       b.setAttribute("aria-current", b.dataset.tab === tab ? "page" : "false");
     }
+    this.renderMobileNavigation();
     $("settings-panel").hidden = tab !== "settings";
-    $("list-controls").hidden = tab === "settings";
+    $("list-controls").hidden = tab === "settings" || tab === "weather";
     $("object-list").hidden = ["settings", "locations"].includes(tab);
     $("location-list").hidden = tab !== "locations";
     $("active-only").parentElement.hidden = ![
@@ -457,8 +727,8 @@ export class UI {
       "jobs",
     ].includes(tab);
     $("list-title").textContent = t(tabLabel(tab));
-    document.querySelector(".list-heading").hidden = tab === "settings";
-    document.querySelector(".search").hidden = tab === "settings";
+    document.querySelector(".list-heading").hidden = tab === "settings" || tab === "weather";
+    document.querySelector(".search").hidden = tab === "settings" || tab === "weather";
     if (tab === "settings") this.settings();
     this.sort =
       this.tabFilters.get(tab)?.sort || (tab === "log" ? "recent" : "name");
@@ -522,6 +792,12 @@ export class UI {
   }
   refresh() {
     if (document.hidden) return;
+    this.syncTrackingControls();
+    if (this.tab === "settings") {
+      // The host section can appear/disappear independently of personal
+      // settings. Preserve active profile drafts and reset confirmations.
+      syncHostSettings(this, $("settings-panel"));
+    }
     const mapScale = $("display-mapScale");
     if (
       mapScale &&
@@ -548,7 +824,8 @@ export class UI {
     this.renderer.root.classList.toggle("stale", this.store.stale);
     const notice = $("notice");
     let text = "";
-    if (this.health?.accountsRecovery) text = t("accountRecovery");
+    if (this.network.lastError) text = t(this.network.lastError) + " " + t(this.network.exhausted ? "connectionRetriesStopped" : "connectionRetrying");
+    else if (this.health?.accountsRecovery) text = t("accountRecovery");
     else if (mode === "demo") text = t("demo");
     else if (this.store.topology && this.store.stale) text = t("stale");
     else if (mode === "client") text = t("hostOnly");
@@ -590,16 +867,29 @@ export class UI {
       }
     }
   }
+  syncTrackingControls() {
+    const moving=item=>["cars","trains","wagonGroups","players"].includes(item?.kind);
+    const active=!!this.renderer.follow||moving(this.renderer.cameraFocus?.item);
+    const button=$("follow");
+    button.classList.toggle("active",active);
+    button.setAttribute("aria-pressed",String(active));
+    button.disabled=!active&&!moving(this.selected);
+    const label=t(active?"stopFollowing":"follow");
+    if(button.textContent!==label)button.textContent=label;
+    button.title=t(active?"stopFollowing":"followSelection");
+    $("home-player").disabled=this.store.players.size===0;
+  }
   collect() {
     const s = this.store;
     let result;
-    if (this.tab === "locations") result = allLocations(s);
+    if (this.tab === "weather") result = s.capabilities?.weather ? [{ ...s.capabilities.weather, id: "weather", name: t("currentWeather") }] : [];
+    else if (this.tab === "locations") result = allLocations(s);
     else if (this.tab === "signs") result = railwaySigns(s);
     else if (this.tab === "signals")
       result = [...s.signals.values()].filter(isSignal);
     else if (this.tab === "cars") result = [...s.cars.values()].filter(isWagon);
     else if (this.tab === "trains")
-      result = [...s.cars.values()].filter(isLocomotive);
+      result = [...s.cars.values()].filter(car => isLocomotive(car) || !!car.catalogModel);
     else if (this.tab === "switches")
       result = [...s.junctions.values()].map((j) => ({
         ...j,
@@ -781,6 +1071,86 @@ export class UI {
   }
   renderRows() {
     if (this.tab === "settings") return;
+    // Weather and Locations replace the virtualized list surface with their
+    // own detail/list DOM. Drop the detached surface references when leaving
+    // either view so the next ordinary tab cannot render into an old node
+    // while leaving the previous panel visible.
+    if (this.tab === "weather" || this.tab === "locations") {
+      this.listSurface = null;
+      this.listWindow = null;
+      this.rowRender = null;
+    }
+    if (this.tab === "weather") {
+      const root = $("object-list");
+      root.hidden = false;
+      const weather = this.store.capabilities?.weather || {};
+      const panel = el("section", undefined, "weather-panel");
+      panel.dataset.key = "weather-panel";
+      const state = weatherState(weather);
+      const icon = el("div", undefined, "weather-icon weather-" + state);
+      icon.dataset.key = "weather-icon";
+      icon.append(uiIcon(weatherIconKey(weather)));
+      panel.append(icon, el("h2", t("currentWeather")), el("strong", t(weatherLabelKey(weather))));
+      const gameTime = formatGameTime(this.store.capabilities);
+      if (gameTime) {
+        const clock = el("div", undefined, "weather-game-time");
+        clock.dataset.key = "weather-game-time";
+        clock.append(el("span", t("gameTimeLabel"), "weather-game-time-label"));
+        const time = el("time", gameTime, "weather-game-time-value");
+        time.dateTime = gameTime;
+        clock.append(time);
+        panel.append(clock);
+      }
+      if (weather.dataQuality !== "ready") panel.append(el("p", t("weatherUnavailable"), "integration-note"));
+      else {
+        if (weather.wetnessKnown && Number.isFinite(Number(weather.wetness)))
+          panel.append(el("p", t("wetness") + ": " + number(weather.wetness * 100, 0) + "%"));
+        const measurements = weatherMeasurements(weather);
+        if (measurements.length) {
+          const dl = el("dl", undefined, "weather-measurements");
+          for (const measurement of measurements) {
+            dl.append(el("dt", t(measurement.key)), el("dd", number(measurement.value * 100, 0) + "%"));
+          }
+          panel.append(dl);
+        }
+      }
+      const forecast = el("section", undefined, "weather-forecast");
+      forecast.dataset.key = "weather-forecast";
+      forecast.append(el("h3", t("weatherForecast")));
+      if (!weather.forecastKnown || !Array.isArray(weather.forecast) || !weather.forecast.length) {
+        forecast.append(el("p", t("weatherForecastUnavailable"), "integration-note"));
+      } else {
+        const list = el("ol", undefined, "weather-forecast-list");
+        for (const [index, item] of weather.forecast.entries()) {
+          const forecastWeather = { ...item, dataQuality: "ready" };
+          const itemState = weatherState(forecastWeather);
+          const row = el("li");
+          row.dataset.key = "weather-forecast-" + index;
+          if (item.timeKnown && Number.isInteger(item.hourStart) && Number.isInteger(item.hourEnd)) {
+            const hours = value => String((value % 24 + 24) % 24).padStart(2, "0") + ":00";
+            row.append(el("time", hours(item.hourStart), "weather-time"));
+            row.title = hours(item.hourStart) + "–" + hours(item.hourEnd) + " · " + t("gameTimeLabel");
+          }
+          const forecastIcon = el("span", undefined, "weather-icon weather-" + itemState);
+          forecastIcon.append(uiIcon(weatherIconKey(forecastWeather)));
+          row.append(forecastIcon, el("span", t(weatherLabelKey(forecastWeather)), "weather-condition"));
+          if (item?.timeKnown && !Number.isInteger(item.hourStart) && Number.isFinite(item.startsInSeconds) && item.startsInSeconds >= 0)
+            row.append(el("small", item.startsInSeconds === 0 ? t("weatherForecastNow") : t("weatherForecastIn").replace("{time}", duration(item.startsInSeconds))));
+          if (!Number.isInteger(item.hourStart) && item?.durationKnown && Number.isFinite(item.durationSeconds))
+            row.append(el("small", t("weatherForecastDuration").replace("{time}", duration(item.durationSeconds))));
+          list.append(row);
+        }
+        forecast.append(list);
+      }
+      panel.append(forecast);
+      const fragment = document.createDocumentFragment();
+      fragment.append(panel);
+      // Keep the panel and forecast rows keyed so capability polling updates
+      // text/icon attributes without detaching an open browser selection or
+      // causing a visible full-panel blink.
+      syncChildren(root, fragment);
+      return;
+    }
     if (this.tab === "locations") {
       renderLocations(this);
       return;
@@ -890,11 +1260,25 @@ export class UI {
         this.selected?.kind === rowKind && this.selected.id === item.id,
       );
       const icon = el("span", undefined, "object-icon");
-      icon.append(uiIcon(this.tab));
+      icon.append(this.tab === "trains" ? locomotiveIcon(item) : uiIcon(this.tab));
       if (this.tab === "jobs") {
         icon.replaceChildren(jobIcon(item));
         icon.classList.add("job-icon");
         icon.style.color = jobColor(item);
+      } else if (this.tab === "trains") {
+        icon.classList.add("locomotive-row-icon");
+        icon.style.color = /^#[a-f\d]{6}$/i.test(item.catalogColor || "")
+          ? item.catalogColor
+          : neutralJobColor;
+      } else if (rowKind === "cars" || rowKind === "wagonGroups") {
+        const visualJob = carJobVisual(this.store, item);
+        if (visualJob) {
+          icon.replaceChildren(jobIcon(visualJob));
+          icon.classList.add("job-icon");
+          icon.style.color = jobColorForStore(this.store, visualJob);
+        } else {
+          icon.style.color = neutralJobColor;
+        }
       }
       row.append(icon);
       const label = el("span");
@@ -972,6 +1356,7 @@ export class UI {
     syncChildren(this.listWindow, fragment);
   }
   pick(kind, item) {
+    if (!this.detailNavigation) this.navigationStack = [];
     if (this.selected?.id !== item.id || this.selected?.kind !== kind) {
       this.signalAspectDraft = null;
       this.signalModeDraft = null;
@@ -988,6 +1373,44 @@ export class UI {
     if (this.tab === kind) this.renderRows();
     this.dirty = true;
   }
+  pickNested(kind, item) {
+    if (!item) return;
+    if (this.selected && (this.selected.kind !== kind || this.selected.id !== item.id))
+      this.pushDetailsContext();
+    this.detailNavigation = true;
+    try { this.pick(kind, item); } finally { this.detailNavigation = false; }
+  }
+  pushDetailsContext() {
+    const inspector = $("inspector");
+    this.navigationStack.push({selection:{...this.selected},scroll:inspector.scrollTop,
+      disclosures:[...inspector.querySelectorAll('details[data-key]')].map(node=>[node.dataset.key,node.open]),
+      camera:{cx:this.renderer.cx,cz:this.renderer.cz,scale:this.renderer.scale},
+      routeTab:this.routeDetailTabs?.get(this.selected.id)});
+    if(this.navigationStack.length>32)this.navigationStack.shift();
+  }
+  backDetails() {
+    while(this.navigationStack.length) {
+      const previous=this.navigationStack.pop(), selection=previous.selection;
+      const item=selection.kind==='warnings'?this.store.routes.find(r=>r.id===selection.route):this.renderer.resolve(selection);
+      if(!item)continue;
+      this.selected=selection;
+      this.renderer.selected=selection.kind==='warnings'?{kind:selection.warning.kind,id:selection.warning.target}:selection;
+      this.renderer.cameraFocus=null;this.renderer.follow=null;
+      Object.assign(this.renderer,previous.camera);
+      // Restoring the camera changes every projected pixel. Mark all render
+      // layers and the hit-test index dirty through the renderer's public
+      // invalidation path; setting ad-hoc flags left the static track canvas
+      // at the child-detail transform until the next pan/resize.
+      this.renderer.invalidate?.();
+      this.renderer.staticDirty = this.renderer.overlayDirty = this.renderer.interactionDirty = true;
+      if(previous.routeTab)this.routeDetailTabs.set(selection.id,previous.routeTab);
+      this.renderInspector();
+      const inspector=$("inspector"),open=new Map(previous.disclosures);
+      for(const node of inspector.querySelectorAll('details[data-key]'))if(open.has(node.dataset.key))node.open=open.get(node.dataset.key);
+      inspector.scrollTop=previous.scroll;this.syncTrackingControls();return true;
+    }
+    return false;
+  }
   location(id) {
     return allLocations(this.store).find(
       (s) => s.id === id || s.id === "pj:" + id,
@@ -999,6 +1422,49 @@ export class UI {
     this.pick("jobs", this.store.jobs.get(job.id));
     this.collect();
     this.renderRows();
+  }
+  recalculateRoute(route) {
+    if (!route?.id || route.endedAt || !route.canRecalculate) return;
+    return this.command("recalculateRoute", { target: route.id });
+  }
+  beginRoute(id, train = null) {
+    this.waypointBefore=null;
+    this.clearRoutePreview();
+    this.startTrack = id;
+    this.startTrain = train;
+    this.endTrack = null;
+    this.routeVia = [];
+    this.routeJobId = null;
+    this.routeTaskIndex = -1;
+    this.routeTaskId = null;
+    this.routeEditingId = null;
+    this.requiredRouteVia = [];
+    this.renderRoute();
+    this.renderInspector();
+  }
+  beginRouteEdit(route) {
+    if(!route?.id || route.endedAt || ['preview','replacing','unconfirmed','recalculating'].includes(route.recalculationState))return;
+    this.beginRoute(route.from,route.trainCar || route.train);
+    this.routeEditingId=route.id;this.routeVia=[...(route.via||[])];this.endTrack=route.to;
+    this.routeJobId=route.jobId;this.routeTaskIndex=route.taskIndex;this.routeTaskId=route.taskId;
+    const job=this.store.jobs.get(route.jobId);
+    if(job && passengerJob(job))this.routeVia=this.routeVia.filter(id=>!job.legs.some(l=>l.passengerStop&&l.toTrack===id)||job.legs.some(l=>l.passengerStop&&l.toTrack===id&&l.progress!=='completed'));
+    this.requiredRouteVia=job && passengerJob(job)?this.routeVia.filter(id=>job.legs.some(l=>l.passengerStop&&l.toTrack===id)):[];
+    this.previewRoute();
+  }
+  routeRequestContext() {
+    return {jobId:this.routeJobId,taskIndex:this.routeTaskIndex,taskId:this.routeTaskId,editingId:this.routeEditingId,avoidReservations:this.avoidForeignReservations};
+  }
+  setRouteDestination(id) {
+    if(this.routeEditingId || this.routeJobId)return;
+    if (!this.startTrack || !this.store.tracks.has(id) || this.routeVia.includes(id)) {
+      this.toast(t("routeWaypointInvalid"), true);
+      return;
+    }
+    if (this.endTrack === id && (this.previewPending || this.store.preview)) return;
+    this.endTrack = id;
+    this.previewRoute();
+    this.renderInspector();
   }
   kv(root, key, value) {
     const row = el("div", undefined, "kv");
@@ -1060,6 +1526,46 @@ export class UI {
       this.refresh();
     }
   }
+  toggleSwitchFromMap(item) {
+    // Returning false tells the shared map input to keep the legacy selection
+    // behaviour when the preference is disabled.  Once enabled, a valid
+    // switch click is consumed even when the authoritative command is
+    // rejected, so a safety error never opens a misleading details panel.
+    if (!preferences.switchClick) return false;
+    const junction = this.store.junctions.get(item?.id), state = this.store.switches.get(item?.id);
+    if (!junction || !Array.isArray(junction.branches) || !junction.branches.length) return false;
+    if (!this.store.capabilities.authority) {
+      this.toast(t("FORBIDDEN"), true);
+      return true;
+    }
+    const current = Number.isInteger(state?.branch) ? state.branch : Number.isInteger(item.branch) ? item.branch : -1;
+    if (current < 0 || current >= junction.branches.length) {
+      this.toast(t("STALE_REVISION"), true);
+      return true;
+    }
+    const next = (current + 1) % junction.branches.length;
+    this.command("setSwitch", {
+      target: junction.id,
+      branch: next,
+      expectedRevision: state?.revision,
+    });
+    return true;
+  }
+  confirmAction(message, action, alternative=null) {
+    return new Promise(resolve => {
+      const dialog=el("dialog",undefined,"action-dialog");
+      dialog.append(el("p",t(message)));
+      const finish=value=>{dialog.close?.();dialog.remove();resolve(value);};
+      const actions=el("div",undefined,"dialog-actions");
+      const yes=el("button",t(action),"dialog-primary"),no=el("button",t("cancel"));
+      yes.onclick=()=>finish(true);no.onclick=()=>finish(false);
+      dialog.oncancel=e=>{e.preventDefault();finish(false);};
+      actions.append(yes);
+      if(alternative){const extra=el("button",t(alternative));extra.onclick=()=>finish("skip");actions.append(extra);}
+      actions.append(no); dialog.append(actions); document.body.append(dialog);
+      if(dialog.showModal)dialog.showModal();else dialog.setAttribute("open","");
+    });
+  }
   toast(message, error = false) {
     const p = el("div", undefined, "toast" + (error ? " error" : ""));
     if (typeof message === "string") p.textContent = message;
@@ -1076,8 +1582,12 @@ export class UI {
     if (!this.selected) {
       target.hidden = true;
       target.replaceChildren();
+      document.body.classList.remove("mobile-sheet-open", "mobile-sheet-collapsed");
+      $("inspector-frame")?.style.removeProperty("--mobile-sheet-offset");
+      $("mobile-sheet-toggle")?.setAttribute("aria-expanded", "false");
       return;
     }
+    $("mobile-sheet-toggle")?.setAttribute("aria-expanded", "true");
     const { kind, id } = this.selected;
     let item = this.renderer.resolve(this.selected);
     if (kind === "warnings") item = currentWarning(this);
@@ -1091,9 +1601,11 @@ export class UI {
       this.renderer.select(null);
       target.hidden = true;
       target.replaceChildren();
+      document.body.classList.remove("mobile-sheet-open", "mobile-sheet-collapsed");
       return;
     }
     if (target.hidden) target.hidden = false;
+    root.classList.add("detail-surface", "detail-kind-" + kind);
     const header = el("header");
     const title = el("div");
     title.append(
@@ -1105,9 +1617,11 @@ export class UI {
           : entityName(this.store, kind, item),
       ),
     );
+    if (this.navigationStack.length && kind !== 'warnings') header.append(detailsBack(this));
     const close = el("button", "×");
     close.setAttribute("aria-label", t("close"));
     close.onclick = () => {
+      this.navigationStack = [];
       this.selected = null;
       this.renderer.select(null);
     };
@@ -1138,7 +1652,8 @@ export class UI {
       const relationSection = (relationKind, objects, emptyKey, renderRow) => {
         const section = el("details", undefined, "relation-group");
         section.dataset.key = "track-relations-" + relationKind;
-        section.open = true;
+        // syncChildren preserves a user's disclosure while this selection is
+        // open. A new inspector selection starts collapsed by default.
         const summary = el("summary");
         summary.append(
           el("strong", t(relationKind === "blocks" ? "relatedBlocks" : "relatedRoutes")),
@@ -1157,7 +1672,7 @@ export class UI {
         const button = el("button", entityName(this.store, relationKind, object), "relation-link");
         button.onclick = () => {
           const current = this.renderer.resolve({ kind: relationKind, id: object.id });
-          if (current) this.pick(relationKind, current);
+          if (current) this.pickNested(relationKind, current);
         };
         row.append(button);
         return row;
@@ -1168,6 +1683,7 @@ export class UI {
           const badges = el("div", undefined, "relation-badges");
           badges.append(el("span", t(block.occupied ? "occupied" : "free"), "status-badge " + (block.occupied ? "occupied" : "free")));
           if (block.reserved) badges.append(el("span", t("reserved"), "status-badge reserved"));
+          if ((block.extraTracks || []).includes(id)) badges.append(el("span", t("nativeProtection"), "status-badge reserved"));
           row.append(badges);
           return row;
         }),
@@ -1189,26 +1705,50 @@ export class UI {
           ? t(this.store.occupancy.get(id).occupied ? "occupied" : "free")
           : t("unknown"),
       );
-      this.button(actions, "startRoute", () => {
-        this.startTrain = null;
-        this.startTrack = id;
-        this.endTrack = null;
-        this.routeVia = [];
-        this.routeWaypointPicking = false;
-        this.store.preview = null;
-        this.renderRoute();
-      });
-      this.button(actions, "endRoute", () => {
-        this.endTrack = id;
-        this.previewRoute();
-      });
-      if (this.startTrack && this.endTrack && id !== this.startTrack && id !== this.endTrack)
-        this.button(actions, "addWaypoint", () => this.addWaypoint(id));
+      if (!this.startTrack) this.button(actions, "startRoute", () => this.beginRoute(id));
+      else {
+        this.button(actions, "endRoute", () => this.setRouteDestination(id), false,
+          !this.planning && !this.routeEditingId && !this.routeJobId && !this.routeVia.includes(id));
+        this.button(actions, "addWaypoint", () => this.addWaypoint(id), false,
+          !this.planning && id !== this.startTrack && id !== this.endTrack && !this.routeVia.includes(id));
+      }
     }
     if (kind === "cars" || kind === "trains" || kind === "wagonGroups") {
       if (kind === "trains") this.kv(root, "type", t(trainDescription(item)));
       this.kv(root, "speed", number(Math.abs(item.speed), 1) + " " + t("kmh"));
-      this.kv(root, "length", number(item.length, 1) + " " + t("meters"));
+      this.kv(root, "length", Number.isFinite(item.length) ? number(item.length, 1) + " " + t("meters") : t("lengthUnavailable"));
+      if(kind==="cars"&&item.locomotive) {
+        const service=consistService(this.store,item);
+        this.kv(root,"consistLength",service.length===null?t("lengthUnavailable"):number(service.length,1)+" "+t("meters"));
+      } else if (kind === "trains" || kind === "wagonGroups")
+        this.kv(root, "consistLength", Number.isFinite(item.length) ? number(item.length, 1) + " " + t("meters") : t("lengthUnavailable"));
+      if (item.massKnown === true && Number.isFinite(Number(item.mass)))
+        this.kv(root, "weight", number(item.mass, 1) + " " + t("tons"));
+      else this.kv(root, "weight", t("massUnavailable"));
+      if ((kind === "trains" || kind === "wagonGroups" || item.locomotive) && item.massKnown === true && Number.isFinite(Number(item.consistMass ?? item.mass)))
+        this.kv(root, "consistWeight", number(item.consistMass ?? item.mass, 1) + " " + t("tons"));
+      if (item.locomotive || kind === "trains") {
+        const traction = el("section", undefined, "traction-capacity");
+        traction.dataset.key = "traction-capacity";
+        traction.append(el("h3", t("tractionCapacity")));
+        const rating = item.tractionRating || locomotiveLoadRating(item.catalogModel || item.model || item.name);
+        if (rating) {
+          traction.append(el("p", `${t("loadRatingReference")} · ${rating.key}`, "integration-note"));
+          traction.append(el("p", `${t("gradeDry")} 0%: ${number(rating.dry0)} ${t("tons")} · 2%: ${number(rating.dry2)} ${t("tons")}`));
+          traction.append(el("p", `${t("gradeWet")} 2%: ${number(rating.wet2)} ${t("tons")}`));
+        }
+        if (item.tractionKnown === true && Number.isFinite(Number(item.availableTraction))) {
+          traction.append(el("p", `${t("generatedTraction")}: ${number(item.availableTraction, 0)} N`, "integration-note"));
+          traction.append(el("small", t("generatedTractionHint")));
+        } else traction.append(el("p", t("tractionUnavailable"), "integration-note"));
+        const assessment = tractionAssessment(item, this.store.capabilities.weather);
+        if (assessment.limit != null) {
+          traction.append(el("p", `${t("tractionAssessment")}: ${t(assessment.key)} · ${t("tractionAssessmentBasis")} ${number(assessment.limit)} ${t("tons")}`, "integration-note"));
+        } else {
+          traction.append(el("p", `${t("tractionAssessment")}: ${t("tractionUnknown")}`, "integration-note"));
+        }
+        root.append(traction);
+      }
       this.kv(
         root,
         "direction",
@@ -1238,10 +1778,6 @@ export class UI {
       );
       if (item.derailed) root.append(el("p", t("derailed"), "warning"));
       if (item.slipping) root.append(el("p", t("slipping"), "warning"));
-      this.button(actions, "follow", () => {
-        this.renderer.follow = this.selected;
-        $("follow").classList.add("active");
-      });
       if (kind === "trains" || kind === "wagonGroups")
         this.button(actions, "showCars", () => {
           this.setTab("cars", { query: item.id });
@@ -1291,7 +1827,7 @@ export class UI {
           "button",
           entityName(this.store, "routes", protectedRoute),
         );
-        link.onclick = () => this.pick("routes", protectedRoute);
+        link.onclick = () => this.pickNested("routes", protectedRoute);
         root.append(link);
       }
       this.kv(
@@ -1402,11 +1938,18 @@ export class UI {
     if (kind === "players") {
       this.kv(root, "role", t(item.host ? "host" : "client"));
       this.kv(root, "cars", entityName(this.store, "cars", item.car));
-      this.button(
-        actions,
-        "follow",
-        () => (this.renderer.follow = this.selected),
-      );
+      const jobs=[...this.store.jobs.values()].filter(job=>item.identityKey &&
+        (job.assignedPlayerKey||job.ownerKey)===item.identityKey && (job.active||job.state==='Available'));
+      const orders=el('section',undefined,'job-progress');orders.dataset.key='player-orders';
+      orders.append(el('h3',t('playerOrders')+' · '+jobs.length),el('p',t('independentOrdersHint')));
+      for(const job of jobs) {
+        const row=el('div',undefined,'job-progress-item');row.dataset.key='player-order-'+job.id;
+        const open=el('button',entityName(this.store,'jobs',job));open.onclick=()=>this.pickNested('jobs',this.store.jobs.get(job.id));
+        row.append(open);
+        for(const leg of job.legs||[])if(leg.progress==='active')row.append(el('small',t('task_active')+' · '+localizedValue(leg.operation||leg.type)));
+        orders.append(row);
+      }
+      root.append(orders);
     }
     extraInspector(this, root, actions, kind, item);
     if (actions.childElementCount) root.append(actions);
@@ -1429,13 +1972,13 @@ export class UI {
           technical.append(el("p", key + ": " + item[key]));
     root.append(technical);
     const selection = kind + ":" + id;
-    if (target.dataset.selection !== selection) target.replaceChildren();
+    if (target.dataset.selection !== selection) {target.replaceChildren();target.scrollTop=0;}
     target.dataset.selection = selection;
     syncChildren(target, root);
     tickClocks(this);
   }
   loco(root, car) {
-    this.kv(root, "brakePipe", number(car.brakePipe, 1) + " bar");
+    this.kv(root, "brakePipe", number(car.brakePipe, 1) + " " + t("pressureBar"));
     for (const control of [
       "throttle",
       "trainBrake",
@@ -1474,14 +2017,22 @@ export class UI {
     const select = el("select");
     select.dataset.key = "uncouple-index";
     select.dataset.preserveValue = "true";
+    select.setAttribute("aria-label",t("uncouplingPosition"));
     for (let i = car.frontCount; i >= -car.rearCount; i--) {
       if (i === 0) continue;
-      const o = el("option", i > 0 ? "+" + i : String(i));
+      const o = el("option", t(i>0?"couplerFront":"couplerRear").replace("{index}",number(Math.abs(i))));
       o.value = i;
       select.append(o);
     }
+    // Keep the coupling position and its action together.  A detached
+    // selector was easy to miss and, on narrow details panels, looked like a
+    // second unrelated control.  The stable data keys remain unchanged for
+    // retained DOM and automation clients.
+    const uncoupleControl = el("div", undefined, "coupler-control");
+    uncoupleControl.dataset.key = "uncouple-control";
+    uncoupleControl.append(select);
     this.button(
-      actions,
+      uncoupleControl,
       "uncouple",
       () =>
         this.command("loco", {
@@ -1494,23 +2045,25 @@ export class UI {
       true,
       select.options.length > 0,
     );
-    root.append(actions, select);
+    actions.append(uncoupleControl);
+    root.append(actions);
   }
   addWaypoint(id) {
-    if (!id || !this.store.tracks.has(id) || !this.startTrack || !this.endTrack) return;
+    if (!id || !this.store.tracks.has(id) || !this.startTrack || this.planning) return;
     if (id === this.startTrack || id === this.endTrack || this.routeVia.includes(id)) {
       this.toast(t("routeWaypointInvalid"), true);
       this.renderRoute();
       return;
     }
-    this.routeVia = [...this.routeVia, id];
+    const at=this.routeVia.indexOf(this.waypointBefore);
+    this.routeVia = [...this.routeVia];this.routeVia.splice(at<0?this.routeVia.length:at,0,id);
     this.store.preview = null;
     this.renderer.overlayDirty = true;
     this.renderRoute();
     this.previewRoute();
   }
   removeWaypoint(index) {
-    if (index < 0 || index >= this.routeVia.length) return;
+    if (index < 0 || index >= this.routeVia.length || this.requiredRouteVia?.includes(this.routeVia[index])) return;
     this.routeVia = this.routeVia.filter((_, i) => i !== index);
     this.store.preview = null;
     this.renderRoute();
@@ -1519,6 +2072,7 @@ export class UI {
   moveWaypoint(index, delta) {
     const target = index + delta;
     if (index < 0 || target < 0 || target >= this.routeVia.length) return;
+    if(this.requiredRouteVia?.includes(this.routeVia[index]))return;
     const next = [...this.routeVia];
     [next[index], next[target]] = [next[target], next[index]];
     this.routeVia = next;
@@ -1531,7 +2085,9 @@ export class UI {
       this.startTrack,
       this.endTrack,
       this.routeVia,
+      this.avoidForeignReservations,
       this.startTrain,
+      this.routeJobId ? this.store.jobs.get(this.routeJobId)?.legs?.map(l=>[l.id,l.progress,l.toTrack]) : null,
       this.store.epoch,
       this.store.topology?.epoch,
       this.store.topology?.revision,
@@ -1542,10 +2098,10 @@ export class UI {
         s.track,
         s.direction,
         s.span,
-        s.stop,
-        s.off,
         s.routeIncoming,
         s.routeBranches,
+        s.routeIncomingDirection,
+        s.routeBranchDirections,
       ]),
       [...this.store.switches.values()].map((s) => [s.id, s.branch]),
       [...this.store.blocks.values()].map((b) => [
@@ -1596,6 +2152,7 @@ export class UI {
       p.removedBlocks?.length ||
       p.occupancy?.length ||
       p.turntables?.length ||
+      (this.routeJobId && (p.replaceJobs || p.jobs?.some(j=>j.id===this.routeJobId))) ||
       (this.startTrain &&
         (p.cars?.length || p.motions?.length || p.removedCars?.length))
     );
@@ -1611,8 +2168,17 @@ export class UI {
     this.store.preview = null;
     this.renderer.overlayDirty = true;
   }
-  async previewRoute() {
+  async previewRoute(retry = 0) {
+    if(this.previewPending && this.previewKey === this.previewStateKey())return;
+    const retainedPreview = this.store.preview?.from === this.startTrack &&
+      this.store.preview?.to === this.endTrack &&
+      JSON.stringify(this.store.preview?.via || []) === JSON.stringify(this.routeVia)
+      ? this.store.preview : null;
     this.clearRoutePreview(true);
+    if (retainedPreview && !this.store.disconnected && this.startTrack && this.endTrack) {
+      this.store.preview = retainedPreview;
+      this.renderer.overlayDirty = true;
+    }
     if (!this.startTrack || !this.endTrack || this.store.disconnected) {
       this.renderRoute();
       return;
@@ -1630,9 +2196,13 @@ export class UI {
         this.startTrain || "",
         this.routeAbort.signal,
         this.routeVia,
+        this.routeRequestContext(),
       );
       if (request !== this.routeRequest) return;
-      if (key !== this.previewStateKey()) return this.previewRoute();
+      if (key !== this.previewStateKey()) {
+        if (retry < 2) return this.previewRoute(retry + 1);
+        throw new Error("ROUTE_CALCULATION_INVALIDATED");
+      }
       const epoch =
         this.store.topology?.epoch + ":" + this.store.topology?.revision;
       this.store.preview = previewWarnings(
@@ -1645,12 +2215,22 @@ export class UI {
       this.renderRoute();
     } catch (e) {
       if (request === this.routeRequest && e.name !== "AbortError") {
+        // A failed/no-path response must not leave an older path actionable.
+        // The retained preview is only a visual bridge while a newer request
+        // is pending; once that request fails, remove it before showing the
+        // authoritative error.
+        this.store.preview = null;
+        this.renderer.overlayDirty = true;
         this.previewKey = null;
+        this.planningError = e.message || "COMMAND_FAILED";
         this.toast(t(e.message), true);
         this.renderRoute();
       }
     } finally {
-      if (request === this.routeRequest) this.previewPending = false;
+      if (request === this.routeRequest) {
+        this.previewPending = false;
+        this.renderRoute();
+      }
     }
   }
   planningContext() {
@@ -1662,11 +2242,14 @@ export class UI {
       this.endTrack,
       this.startTrain || "",
       this.routeVia,
+      this.avoidForeignReservations,
+      this.routeRequestContext(),
     ]);
   }
   async planPreview() {
     if (
       this.planning ||
+      this.previewPending ||
       this.plannedRoute ||
       !this.startTrack ||
       !this.endTrack ||
@@ -1674,31 +2257,46 @@ export class UI {
     )
       return;
     const context = this.planningContext();
+    const job=this.store.jobs.get(this.routeJobId);
+    if(job?.state==="Available") {
+      const decision=await this.confirmAction("acceptJobPrompt","acceptAndContinue","planWithoutAccepting");
+      if(!decision)return;
+      if(context!==this.planningContext())return;
+      if(decision!=="skip") {
+        const accepted=await this.command("acceptJob",{target:job.id});
+        if(accepted.status!=="applied"||context!==this.planningContext())return;
+        if(!this.store.jobs.get(job.id)?.active){this.toast(t("JOB_STATE_CHANGED"),true);return;}
+      }
+    }
     this.planning = true;
     this.planningError = null;
     this.planningPreview = this.store.preview;
     this.renderRoute();
     try {
-      const result = await this.command("planRoute", {
+      const result = await this.command(this.routeEditingId ? "editRoutePoints" : "planRoute", {
+        target:this.routeEditingId,
         from: this.startTrack,
         to: this.endTrack,
         train: this.startTrain || null,
         via: [...this.routeVia],
+        avoidReservations: this.avoidForeignReservations,
+        jobId: this.routeJobId,
+        taskIndex: this.routeTaskIndex,
+        taskId: this.routeTaskId,
       });
+      if (context !== this.planningContext()) return;
       if (result.status !== "applied" || !result.target) {
         this.planningError = result.code || "COMMAND_FAILED";
         this.renderRoute();
         return;
       }
-      if (context !== this.planningContext())
-        return;
       this.plannedRoute = { id: result.target, context };
       // The final receipt carries the server's confirmed route, closing the
       // receipt/routes-stream race without choosing by name or creating a plan.
       const known = this.store.routes.find((r) => r.id === result.target);
       if (
         result.route?.id === result.target &&
-        (!known || known.lifecycle === "preparing") &&
+        (this.routeEditingId || !known || known.lifecycle === "preparing") &&
         Array.isArray(result.route.tracks)
       ) {
         this.store.routes = known
@@ -1720,14 +2318,15 @@ export class UI {
       return;
     }
     const route = this.store.routes.find((r) => r.id === pending.id);
-    if (!route) {
-      // The receipt is authoritative even when the routes stream is one frame
-      // behind. Close the draft immediately and keep the exact ID pending;
-      // the next routes snapshot/delta will open its inspector.
-      if (!pending.closed) this.closePlanningDraft();
+    if (!route || route.lifecycle === "preparing") {
+      // An applied receipt must contain the confirmed plan or refer to a
+      // confirmed streamed record. Do not wait forever for an unspecified
+      // future frame when the server has already finished this operation.
+      this.plannedRoute = null;
+      this.planningError = "ROUTE_STATE_NOT_CONFIRMED";
+      this.renderRoute();
       return;
     }
-    if (route.lifecycle === "preparing") return;
     if (route.endedAt || route.lifecycle === "failed") {
       this.plannedRoute = null;
       this.toast(t(route.reason || "ROUTE_ENDED"), true);
@@ -1752,7 +2351,11 @@ export class UI {
     this.routeAbort?.abort();
     this.startTrack = this.endTrack = this.startTrain = null;
     this.routeVia = [];
-    this.routeWaypointPicking = false;
+    this.routeJobId = null;
+    this.routeTaskIndex = -1;
+    this.routeTaskId = null;
+    this.routeEditingId = null;
+    this.requiredRouteVia = [];
     this.store.preview = null;
     this.tabFilters.delete("routes");
     this.tabQueries.delete("routes");
@@ -1767,8 +2370,6 @@ export class UI {
   renderRoute() {
     if (this.plannedRoute && !this.plannedRoute.closed && this.plannedRoute.context !== this.planningContext())
       this.plannedRoute = null;
-    this.renderer.trackPicking =
-      this.tab === "tracks" || !!this.startTrack || this.routeWaypointPicking;
     const target = $("route-bar"),
       root = el("div");
     if (target.hidden !== !this.startTrack) target.hidden = !this.startTrack;
@@ -1780,6 +2381,7 @@ export class UI {
     const from = this.store.tracks.get(this.startTrack),
       train = this.store.train(this.startTrain);
     root.append(
+      el("span", t("startRoute") + ":"),
       el(
         "strong",
         train
@@ -1788,6 +2390,9 @@ export class UI {
       ),
       el("span", "→"),
     );
+    const orderJob=this.store.jobs.get(this.routeJobId);
+    const stopNames=new Map(orderJob&&passengerJob(orderJob)?passengerStops(orderJob).map(stop=>[stop.track,passengerStopLabel(this.store,stop)]):[]);
+    const pointLabel=id=>stopNames.get(id)||trackName(this.store,id);
     const destination = el("input"),
       options = el("datalist");
     options.id = "route-destinations";
@@ -1795,7 +2400,7 @@ export class UI {
     destination.placeholder = t("selectEnd");
     destination.setAttribute("aria-label", t("destination"));
     destination.value = this.endTrack
-      ? trackName(this.store, this.endTrack)
+      ? pointLabel(this.endTrack)
       : "";
     destination.dataset.key = "route-destination";
     const suggest = (input = destination, output = options) => {
@@ -1826,7 +2431,15 @@ export class UI {
       suggest(input, document.getElementById("route-destinations"));
     };
     suggest();
-    root.append(destination, options);
+    destination.onchange = (e) => {
+      const value = normalizeSearch(e.currentTarget.value);
+      const matches = [...this.store.tracks.values()].filter(track =>
+        [track.id, trackName(this.store, track)].some(name => normalizeSearch(name) === value));
+      if (matches.length === 1) this.setRouteDestination(matches[0].id);
+      else { this.planningError = "selectValidTrack"; this.renderRoute(); }
+    };
+    destination.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); e.currentTarget.onchange(e); } };
+    destination.disabled = !!this.planning || !!this.routeEditingId || !!this.routeJobId;
     const waypoints = el("div", undefined, "route-waypoints");
     waypoints.dataset.key = "route-waypoints";
     if (this.routeVia.length) {
@@ -1835,40 +2448,32 @@ export class UI {
       this.routeVia.forEach((id, index) => {
         const row = el("li", undefined, "route-waypoint");
         row.dataset.id = id;
-        row.append(el("span", trackName(this.store, id)));
+        row.dataset.key = 'waypoint-'+id;
+        row.append(el("span", number(index + 1) + ". " + pointLabel(id)));
+        row.append(el('small',t(this.requiredRouteVia?.includes(id)?'orderStopRequired':'manualRouteWaypoints')));
         const actions = el("span", undefined, "route-waypoint-actions");
         const up = el("button", "↑");
         up.type = "button";
         up.title = t("moveWaypointUp");
-        up.disabled = index === 0;
+        up.disabled = index === 0 || this.requiredRouteVia?.includes(id);
         up.onclick = () => this.moveWaypoint(index, -1);
         const down = el("button", "↓");
         down.type = "button";
         down.title = t("moveWaypointDown");
-        down.disabled = index === this.routeVia.length - 1;
+        down.disabled = index === this.routeVia.length - 1 || this.requiredRouteVia?.includes(id);
         down.onclick = () => this.moveWaypoint(index, 1);
         const remove = el("button", "×");
         remove.type = "button";
+        remove.disabled = this.requiredRouteVia?.includes(id) === true;
         remove.title = t("removeWaypoint");
         remove.onclick = () => this.removeWaypoint(index);
         actions.append(up, down, remove);
-        row.append(actions);
+        if(!this.requiredRouteVia?.includes(id))row.append(actions);
         list.append(row);
       });
       waypoints.append(list);
     }
-    const addWaypoint = this.button(
-      root,
-      this.routeWaypointPicking ? "choosingWaypoint" : "addWaypoint",
-      () => {
-        this.routeWaypointPicking = !this.routeWaypointPicking;
-        this.renderRoute();
-      },
-      false,
-      !!this.endTrack && !this.planning && !this.plannedRoute,
-    );
-    addWaypoint.dataset.key = "action-add-waypoint";
-    if (this.routeVia.length) {
+    if (this.routeVia.length && !this.requiredRouteVia?.length) {
       const clearWaypoints = this.button(root, "clearWaypoints", () => {
         this.routeVia = [];
         this.store.preview = null;
@@ -1876,50 +2481,72 @@ export class UI {
         this.previewRoute();
       });
       clearWaypoints.dataset.key = "action-clear-waypoints";
+      clearWaypoints.disabled = !!this.requiredRouteVia?.length;
     }
     root.append(waypoints);
-    this.button(root, "calculateRoute", () => {
-      const value = target.querySelector(
-        '[data-key="route-destination"]',
-      ).value;
-      const normalized = normalizeSearch(value);
-      const matches = normalized
-        ? [...this.store.tracks.values()].filter((track) =>
-            [track.id, track.name, trackName(this.store, track)].some(
-              (name) => normalizeSearch(name) === normalized,
-            ),
-          )
-        : [];
-      if (matches.length !== 1) {
-        this.toast(t("selectValidTrack"), true);
-        return;
-      }
-      this.endTrack = matches[0].id;
+    const reservationOption = el("label", undefined, "route-reservation-option"),
+      avoidReservations = el("input");
+    avoidReservations.type = "checkbox";
+    avoidReservations.checked = this.avoidForeignReservations;
+    avoidReservations.setAttribute("aria-label", t("avoidForeignReservations"));
+    avoidReservations.onchange = (event) => {
+      this.avoidForeignReservations = event.currentTarget.checked;
+      this.store.preview = null;
+      this.renderRoute();
       this.previewRoute();
-    });
+    };
+    reservationOption.append(avoidReservations, el("span", t("avoidForeignReservations")));
+    reservationOption.dataset.key = "avoid-foreign-reservations";
+    root.append(reservationOption);
+    const addPoint=el('div',undefined,'route-waypoint-entry');addPoint.dataset.key='waypoint-entry';
+    const pointInput=el('input');pointInput.dataset.key='waypoint-input';pointInput.dataset.preserveValue='true';
+    pointInput.setAttribute('aria-label',t('addWaypoint'));pointInput.setAttribute('list',options.id);pointInput.placeholder=t('addWaypoint');
+    pointInput.disabled=!!this.planning;
+    pointInput.oninput=e=>suggest(e.currentTarget,document.getElementById('route-destinations'));
+    const before=el('select');before.dataset.key='waypoint-before';before.setAttribute('aria-label',t('waypointBefore'));before.disabled=!!this.planning;
+    for(const id of [...this.routeVia,this.endTrack].filter(Boolean)) {
+      const option=el('option',pointLabel(id));option.value=id;option.selected=id===(this.waypointBefore||this.endTrack);before.append(option);
+    }
+    before.onchange=e=>{this.waypointBefore=e.currentTarget.value;};
+    addPoint.append(pointInput,el('span',t('waypointBefore')),before);
+    this.button(addPoint,'addWaypoint',()=>{
+      const input=target.querySelector('[data-key="waypoint-input"]'),query=normalizeSearch(input.value);
+      const matches=[...this.store.tracks.values()].filter(track=>[track.id,trackName(this.store,track)].some(name=>normalizeSearch(name)===query));
+      if(matches.length!==1){this.toast(t('selectValidTrack'),true);return;}
+      this.addWaypoint(matches[0].id);input.value='';
+    },false,!this.planning);
+    root.append(addPoint);
+    root.append(el("span", t("destination") + ":"), destination, options);
+    if (!this.endTrack) root.append(el("p", t("selectEnd"), "route-point-hint"));
+    if (!this.endTrack) root.append(el("p", t("routePointActions"), "route-point-hint"));
+    if (this.previewPending) root.append(el("span", t("calculatingRoute"), "route-calculation-status"));
+    if (this.planningError) {
+      root.append(el("p", localizedValue(this.planningError, "COMMAND_FAILED"), "warning route-planning-error"));
+      if (!this.planning && !this.previewPending && this.endTrack)
+        this.button(root, "retryRouteCalculation", () => this.previewRoute());
+    }
     if (this.store.preview || this.planning || this.plannedRoute) {
       const preview =
         this.store.preview || this.planningPreview || this.lastPreview;
       if (preview) {
         root.append(el("span", number(preview.length) + " " + t("meters")));
+        const estimate=routeTime(preview,this.store);
+        if(estimate) {
+          const time=el("span",t("routeEstimate").replace("{min}",number(estimate.min)).replace("{max}",number(estimate.max)),"route-time");
+          time.title=t("routeEstimateHint");root.append(time);
+        }
         const planButton = this.button(
           root,
-          "plan",
+          this.routeEditingId ? "previewRouteEdit" : "plan",
           () => this.planPreview(),
           true,
-          !this.planning && !this.plannedRoute && !!this.store.preview,
+          !this.previewPending && !this.planning && !this.plannedRoute && !!this.store.preview,
         );
-        if (this.planning || this.plannedRoute)
+        if (this.routeJobId && !this.store.jobs.get(this.routeJobId)?.active)
+          root.append(el("p", t("orderAcceptanceHint"), "route-point-hint"));
+        if (this.previewPending || this.planning || this.plannedRoute)
           planButton.textContent = t(
-            this.planning ? "planningRoute" : "waitingRoute",
-          );
-        if (this.planningError)
-          root.append(
-            el(
-              "p",
-              localizedValue(this.planningError, "COMMAND_FAILED"),
-              "warning route-planning-error",
-            ),
+            this.previewPending ? "calculatingRoute" : this.planning ? "planningRoute" : "waitingRoute",
           );
         const details = el("details", undefined, "route-preview-details"),
           summary = el(
@@ -1942,10 +2569,14 @@ export class UI {
       }
     }
     this.button(root, "clear", () => {
-      this.routeRequest = (this.routeRequest || 0) + 1;
+      this.clearRoutePreview();
       this.startTrack = this.endTrack = this.startTrain = null;
       this.routeVia = [];
-      this.routeWaypointPicking = false;
+      this.routeJobId = null;
+      this.routeTaskIndex = -1;
+      this.routeTaskId = null;
+      this.routeEditingId = null;
+      this.requiredRouteVia = [];
       this.store.preview = null;
       target.hidden = true;
       this.renderer.overlayDirty = true;
@@ -1956,9 +2587,6 @@ export class UI {
     const root = $("settings-panel");
     root.replaceChildren();
     const groups = displaySettings(this, root);
-    this.button(groups.interfaceSettings, "resetPanels", () =>
-      window.dispatchEvent(new Event("ads-reset-panels")),
-    );
     groups.interfaceSettings.append(el("p", t("resizeHint")));
     groups.dispatchSettings.append(
       el("h4", t("advisoryShort")),
@@ -1998,111 +2626,69 @@ export class UI {
       setTimeout(() => URL.revokeObjectURL(a.href), 500);
     });
     const access = groups.accessSettings;
-    access.append(
+    if (this.user?.role !== "admin") access.append(
       el("p", t("webAccessExplanation")),
       el(
         "p",
         t(
-          this.user?.role === "admin"
-            ? "ownerAccessHelp"
-            : this.user?.role === "dispatcher"
+          this.user?.role === "dispatcher"
               ? "dispatcherAccessHelp"
               : "viewerAccessHelp",
         ),
       ),
     );
     if (this.user?.role !== "admin") return;
-    access.append(el("h4", t("accounts")), el("p", t("accountHint")));
-    const existing = el("select"),
-      existingLabel = el("label", t("existingAccounts"));
-    existing.id = "existing-accounts";
-    existingLabel.append(existing);
-    access.append(existingLabel);
-    const loadAccounts = async () => {
-      existing.replaceChildren(el("option", t("loading")));
-      try {
-        const accounts = await this.network.accounts();
-        if (!access.isConnected) return;
-        existing.replaceChildren(el("option", t("newAccount")));
-        existing.firstChild.value = "";
-        for (const account of accounts) {
-          const option = el("option", account.name + " · " + t(account.role));
-          option.value = account.name;
-          option.dataset.role = account.role;
-          existing.append(option);
-        }
-      } catch (error) {
-        existing.replaceChildren(el("option", t("accountsUnavailable")));
-        console.warn("ADS_ACCOUNTS_READ_FAILED", error.name);
-      }
-    };
-    loadAccounts();
-    const form = el("form"),
-      name = el("input"),
-      password = el("input"),
-      role = el("select");
-    form.id = "account-management-form";
-    name.autocomplete = "off";
-    existing.onchange = () => {
-      name.value = existing.value;
-      password.value = "";
-      role.value = existing.selectedOptions?.[0]?.dataset.role || "viewer";
-    };
-    name.required = true;
-    name.maxLength = 48;
-    password.type = "password";
-    password.minLength = 10;
-    password.maxLength = 128;
-    password.required = true;
-    password.autocomplete = "new-password";
-    for (const value of ["viewer", "dispatcher"]) {
-      const option = el("option", t(value));
-      option.value = value;
-      role.append(option);
-    }
-    for (const [key, input] of [
-      ["username", name],
-      ["password", password],
-      ["role", role],
-    ]) {
-      const label = el("label", t(key));
-      label.append(input);
-      form.append(label);
-    }
-    const submit = el("button", t("saveAccount"), "primary");
-    submit.type = "submit";
-    form.append(submit);
-    form.onsubmit = async (e) => {
-      e.preventDefault();
-      submit.disabled = true;
-      try {
-        const r = await fetch("/api/accounts", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: name.value,
-            password: password.value,
-            role: role.value,
-          }),
-        });
-        this.toast(t(r.ok ? "accountSaved" : "accountFailed"), !r.ok);
-        if (r.ok) {
-          password.value = "";
-          await loadAccounts();
-        }
-      } catch (error) {
-        console.warn("ADS_ACCOUNT_SAVE_FAILED", error.name);
-        this.toast(t("accountFailed"), true);
-      } finally {
-        submit.disabled = false;
-      }
-    };
-    access.append(form);
+    accountSettings(this, access);
+    this.connectionSettings(access);
     this.button(
       groups.dispatchSettings,
       "rescan",
       () => this.command("rescan"),
       true,
     );
+  }
+  async connectionSettings(access) {
+    if (!this.network.connectionInfo) return;
+    const info = el("details", undefined, "host-connection"), user = this.user;
+    const summary = el("summary", t("hostConnection")), body = el("div");
+    info.dataset.key = "host-connection-info";
+    body.append(el("p", t("loadingConnection")));
+    info.append(summary, body);
+    access.append(info);
+    try {
+      const connection = await this.network.connectionInfo();
+      if (!access.isConnected || this.user !== user) return;
+      body.replaceChildren(el("p", t(connection.remoteAccess ? "remoteAccessEnabled" : "remoteAccessDisabled")));
+      for (const address of connection.addresses || []) {
+        const label = { Local: "addressLocal", LAN: "addressLan", "Radmin VPN": "addressVpn", Public: "addressPublic" }[address.label];
+        const link = el("a", address.url);
+        let url;
+        try { url = new URL(address.url); } catch { continue; }
+        if (!["http:", "https:"].includes(url.protocol)) continue;
+        link.href = url.href;
+        const row = el("div", undefined, "host-connection-address");
+        row.append(el("small", label ? t(label) : t("hostConnection")), link);
+        body.append(row);
+      }
+      if (connection.https && connection.certificate) {
+        const certificate = connection.certificate;
+        const trust = el("details", undefined, "host-certificate");
+        trust.append(el("summary", t("certificateSetup")), el("p", t("certificateTrustHelp")), el("p", t("certificateFingerprint") + ": " + certificate.sha256));
+        const expires = new Date(certificate.expires);
+        if (Number.isFinite(expires.getTime())) trust.append(el("p", t("certificateExpires") + ": " + expires.toLocaleDateString(language())));
+        const download = el("a", t("downloadCertificate"));
+        download.href = "/api/certificate";
+        download.download = "dispatcher-ca.cer";
+        trust.append(download);
+        body.append(trust);
+      }
+    } catch (error) {
+      if (!access.isConnected || this.user !== user) return;
+      body.replaceChildren(el("p", t(["HOST_TIMEOUT", "HOST_UNAVAILABLE", "AUTH_REQUIRED", "FORBIDDEN"].includes(error.message) ? error.message : "HOST_BAD_RESPONSE")));
+      const retry = el("button", t("retryConnectionInfo"));
+      retry.type = "button";
+      retry.onclick = () => { info.remove(); this.connectionSettings(access); };
+      body.append(retry);
+    }
   }
 }

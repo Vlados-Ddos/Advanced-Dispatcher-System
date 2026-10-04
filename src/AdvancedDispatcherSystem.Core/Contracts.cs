@@ -26,6 +26,9 @@ namespace AdvancedDispatcherSystem.Core
     {
         public string id, name;
         public double length;
+        // Penalty derived from native station/warehouse spawn metadata. It is
+        // a routing preference only; it never makes a track unreachable.
+        public double routePenalty;
         public double[] points;
         public double[] spans = new double[0];
         public Link[] a = new Link[0], b = new Link[0];
@@ -80,11 +83,25 @@ namespace AdvancedDispatcherSystem.Core
     }
     public sealed class StationDef
     {
-        public string id, name, type, source, parent, code, platform, platformLabel, color;
+        public string nameEn, nameRu;
+        public string id, name, type, source, parent, code, platform, platformLabel, trackGroup, color;
         public string[] searchNames = new string[0];
         public double x, z;
         public bool industry, city, passenger;
         public string[] tracks = new string[0];
+        // Authoritative native track membership for the location. `tracks`
+        // remains the compact routing identity list; this projection carries
+        // metadata for the location inspector without parsing display names.
+        public StationTrackDef[] stationTracks = new StationTrackDef[0];
+        // Native station tracks used by warehouse/job car generation. Kept
+        // separate from all station tracks so through rails remain preferred
+        // when the game exposes an explicit operational spawn track.
+        public string[] spawnTracks = new string[0];
+    }
+    public sealed class StationTrackDef
+    {
+        public string id, name, fullName, group;
+        public int direction;
     }
     public sealed class SignState
     {
@@ -113,8 +130,11 @@ namespace AdvancedDispatcherSystem.Core
     public struct CarState
     {
         public string id, name, consist, type, track1, track2, job, destination;
-        public string cargo, model, modelLanguage, catalogColor, vehicleCategory;
+        public string cargo, model, modelLanguage, catalogModel, catalogColor, vehicleCategory;
+        public string availability;
         public string[] searchNames;
+        public bool couplersKnown;
+        public string coupledFront, coupledRear;
         public bool nativeTrainset;
         public bool cargoKnown;
         public CargoSummary consistCargo;
@@ -122,11 +142,19 @@ namespace AdvancedDispatcherSystem.Core
         public double x, z, yaw, length, width, span1, span2, speed;
         public int direction, order, frontCount, rearCount;
         public bool locomotive, derailed, controllable, slipping, canCouple;
+        // Authoritative mass values captured from TrainMassController. Values
+        // are expressed in metric tonnes on the wire; zero is valid only when
+        // massKnown is false (for suspended/uninitialised runtime objects).
+        public bool massKnown;
+        public double mass, consistMass;
+        public bool tractionKnown;
+        public double availableTraction;
         public float throttle, trainBrake, independentBrake, reverser, brakePipe;
         public long revision, sampledAt;
     }
     public struct PlayerState
     {
+        public string identityKey;
         public string id, name, car;
         public double x, z, yaw, carX, carZ, carYaw;
         public bool carPoseKnown;
@@ -169,9 +197,13 @@ namespace AdvancedDispatcherSystem.Core
     }
     public sealed class SignalState
     {
-        // Native multi-head junction ownership, independent of today's switch state.
+        // Native controller's StartingTrack, distinct from the mast's placement track.
+        public string authorityTrack;
+        // Native junction gate, including single-head controllers and reversed mouths.
         public string routeIncoming;
         public string[] routeBranches = new string[0];
+        public int routeIncomingDirection;
+        public int[] routeBranchDirections = new int[0];
         public bool routeBindingRequired;
         public string displayLayer;
         public SignalLamp[] lampLayout = new SignalLamp[0];
@@ -206,10 +238,14 @@ namespace AdvancedDispatcherSystem.Core
     {
         public string id;
         public bool occupied;
+        public string[] cars;
+        public bool carsKnown;
         public long sampledAt;
     }
     public sealed class JobLeg
     {
+        public string id, progress = "unknown", operation;
+        public bool passengerStop;
         public string from, to, fromTrack, toTrack, type, state, station, source;
         public bool couplingRequired, handbrakeRequired;
         public string[] cargo = new string[0];
@@ -218,10 +254,11 @@ namespace AdvancedDispatcherSystem.Core
     }
     public sealed class JobState
     {
+        public string assignedPlayerId, assignedPlayerName, assignedPlayerKey;
         public string id, origin, destination, type, state, owner, ownerKey, ownerStatus, startedGameDate;
         public string typeColor, typeSource, integrationStatus, typeName, typeLanguage;
         public string dataQuality = "ready";
-        public bool active, elapsedKnown;
+        public bool active, elapsedKnown, massKnown;
         public double length, mass, payment, bonus, elapsedSeconds, bonusLimitSeconds, sampledGameTime;
         public long sampledAt;
         public int tasksDone, tasksTotal;
@@ -234,10 +271,50 @@ namespace AdvancedDispatcherSystem.Core
         public string passengerStatus = "absent", passengerVersion = "";
         public string mode = "loading", status = "loading", signalsStatus = "absent", multiplayerVersion = "", language = "en", signsStatus = "loading";
         public double gameTime, clockRate;
+        // Authoritative current time-of-day from DV.TimeKeeping.WorldClockController.
+        // gameTime is the job timer and is deliberately kept separate from this
+        // clock value so the Weather panel never treats elapsed job seconds as a
+        // wall-clock time.
+        public double gameTimeOfDay;
+        public bool gameTimeOfDayKnown;
         public bool authority, signals, signalCommands, locoControls, protectedReservations;
         public int trackCount, carCount, signalCount;
         public double captureMs;
         public long sampledAt;
+        public WeatherState weather = new WeatherState();
+        // Settings that affect the captured multiplayer game are owned by the
+        // game host.  They are published as state so remote browser clients
+        // can display the effective values without treating them as local
+        // display preferences. Transport credentials are never included.
+        public HostSettingsState hostSettings;
+    }
+    public sealed class HostSettingsState
+    {
+        public bool readOnly, showUndiscovered, adminControls;
+        public double captureBudgetMs;
+        public bool remoteLanAccess;
+        public int port;
+        public string publicHost;
+    }
+    public sealed class WeatherState
+    {
+        // Values come from DV.WeatherSystem at runtime. No external weather
+        // service or fabricated forecast is used by the dispatcher.
+        public string state = "unknown", dataQuality = "unavailable", icon;
+        public bool rainKnown, wetnessKnown, thunderKnown, fogKnown, cloudinessKnown;
+        public double rain, wetness, thunder, fog, cloudiness;
+        // Published only from the native WeatherForecaster's valid daily
+        // interpretedData, retaining its current/upcoming buckets.
+        public bool forecastKnown;
+        public WeatherForecastEntry[] forecast = Array.Empty<WeatherForecastEntry>();
+        public long sampledAt;
+    }
+    public sealed class WeatherForecastEntry
+    {
+        public string state = "unknown", icon;
+        public int hourStart, hourEnd;
+        public bool durationKnown, timeKnown;
+        public double durationSeconds, startsInSeconds;
     }
     public sealed class GameBatch
     {
@@ -265,10 +342,20 @@ namespace AdvancedDispatcherSystem.Core
     }
     public sealed class Command
     {
-        public string reservationMode, routeId;
+        public string reservationMode, routeId, routeEditId;
+        // Planner preference: when false, a path may cross another route's
+        // reservation and the reservation boundary will require an explicit
+        // normal-mode confirmation. Protected native reservations remain
+        // authoritative and cannot be bypassed.
+        public bool avoidReservations = true, forceReservation;
+        // Optional linkage for a route requested on behalf of one concrete
+        // order task. The task remains authoritative in the game; a route is
+        // only the current movement plan for it.
+        public string jobId, taskId;
+        public int taskIndex = -1;
         // Only the authenticated Host builds this internal execution plan.
         public RoutePlan route;
-        public string id, epoch, kind, target, action, from, to, train;
+        public string id, epoch, kind, target, action, reason, from, to, train;
         // Ordered track ids that the route must visit between from and to.
         public string[] via = new string[0];
         public long topologyRevision, expectedRevision, deadline;
@@ -290,6 +377,9 @@ namespace AdvancedDispatcherSystem.Core
     public sealed class WireFrame
     {
         public int protocol = Protocol.Version;
+        // Metadata and the immediately following compact motion frame form
+        // one capture transaction. This IPC-only marker never enters Web DTOs.
+        public int motionCount;
         public string kind, token, proof;
         public Topology topology;
         public GameBatch batch;
@@ -298,13 +388,42 @@ namespace AdvancedDispatcherSystem.Core
     }
     public sealed class RoutePlan
     {
+        // Path arrays/steps are replaced as a whole by route transactions. A
+        // record copy freezes scalar fields and array references for IPC replay.
+        public RoutePlan Snapshot() => (RoutePlan)MemberwiseClone();
         public string lifecycle = "active", reservationMode = "none", reservationState = "none", reason, trainCar;
+        public string recalculationState = "none";
+        public bool canRecalculate;
+        public string invalidationReason, nativeReason;
+        public string editVersion, recalculationKey;
+        public int recalculationAttempts;
+        // A recalculation is an edit of this route. The preview is kept on the
+        // authoritative route record until the dispatcher confirms it, so the
+        // old path/reservation remains intact while the proposed path is shown.
+        public RouteEditPreview editPreview;
         public string[] trainCars = new string[0], reservedSignals = new string[0], reservationTracks = new string[0];
+        // Native signal blocks are released as the consist tail clears them.
+        // These fields retain route identity/progress without rewriting the
+        // logical path (which may legitimately reuse a track in reverse).
+        public string[] releasedSignals = new string[0], releasedTracks = new string[0];
         public long endedAt;
-        public string id, name, owner, from, to, train, status = "planned";
+        public string id, name, owner, reservationOwner, assignedPlayerKey, assignedPlayerName, from, to, train, status = "planned";
+        // Order/task linkage is metadata only and survives route edits. It
+        // never turns a route into the order itself.
+        public string jobId, taskId;
+        public int taskIndex = -1;
+        public bool passengerRoute;
+        // A continuous reservation cannot safely hold a physical rail twice
+        // (or two different switch positions).  In that case the logical
+        // route remains one record and exposes independently reservable legs.
+        public bool staged;
+        public string stageStatus = "single", stagedReason, stagedReservationMode;
+        public int stageIndex;
+        public string activeFrom, activeTo;
+        public RouteStage[] stages = new RouteStage[0];
         public string[] tracks, warnings;
         // Ordered intermediate track ids requested by the dispatcher.
-        public string[] via = new string[0];
+        public string[] via = new string[0], manualVia = new string[0];
         public int[] directions;
         public RouteStep[] switches;
         public TurntableStep[] turntables = new TurntableStep[0];
@@ -314,6 +433,33 @@ namespace AdvancedDispatcherSystem.Core
         public RouteConflict[] conflicts = new RouteConflict[0];
         public RouteConflict[] history = new RouteConflict[0];
         public RoutePoint[] itinerary = new RoutePoint[0];
+    }
+    public sealed class RouteStage
+    {
+        public string id, from, to, status = "pending";
+        public string reservationMode = "none", reservationState = "none";
+        public string[] tracks = new string[0], reservedSignals = new string[0], reservationTracks = new string[0];
+        public int[] directions = new int[0];
+        public RouteStep[] switches = new RouteStep[0];
+        public TurntableStep[] turntables = new TurntableStep[0];
+        public double length, remaining, startSpan;
+    }
+    public sealed class RouteEditPreview
+    {
+        // Missing in previews persisted before VIA editing was introduced.
+        public string[] via, manualVia;
+        public string id, reason, affectedTrack, topologyEpoch;
+        public bool staged;
+        public string stageStatus, stagedReason, stagedReservationMode, activeFrom, activeTo;
+        public int stageIndex;
+        public RouteStage[] stages = new RouteStage[0];
+        public long topologyRevision, createdAt;
+        public string[] tracks = new string[0], reservationTracks = new string[0], reservedSignals = new string[0], warnings = new string[0];
+        public int[] directions = new int[0];
+        public RouteStep[] switches = new RouteStep[0];
+        public TurntableStep[] turntables = new TurntableStep[0];
+        public RoutePoint[] itinerary = new RoutePoint[0];
+        public double length, startSpan, remaining;
     }
     public sealed class RouteConflict
     {
@@ -325,10 +471,14 @@ namespace AdvancedDispatcherSystem.Core
     {
         public string id, lifecycle = "active", mode = "none", reservation = "none", reason;
         public string[] signals = new string[0];
+        // The authoritative game plan lets a Host recover the path after a
+        // reconnect even if the replacement transaction crossed a restart.
+        public RoutePlan plan;
         public long time;
     }
     public sealed class RoutePoint
     {
+        public bool boundary;
         public string kind, id, track;
         public double distance;
         public bool current;

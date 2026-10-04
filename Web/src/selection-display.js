@@ -168,7 +168,7 @@ function* prepareSignalPlan(renderer, signature, revision) {
     renderer.signalLayouts ||= new Map();
   }
   if (placementChanged)
-    renderer.infrastructureDirty = renderer.interactionDirty = true;
+    renderer.infrastructureDirty = renderer.interactionDirty = renderer.hoverDirty = true;
 }
 export function advanceSignalLayouts(renderer, budget = 2) {
   const started = performance.now();

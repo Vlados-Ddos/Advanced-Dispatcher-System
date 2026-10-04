@@ -2,6 +2,11 @@ import { t, compareNames } from "./localization.js";
 import { entityName } from "./display-names.js";
 
 export function jobOwner(job, store) {
+  if(job.assignedPlayerKey) {
+    const player=[...store.players.values()].find(p=>p.identityKey===job.assignedPlayerKey);
+    return {key:job.assignedPlayerKey==="local"?"local":"player:"+job.assignedPlayerKey,
+      name:player?entityName(store,"players",player):job.assignedPlayerName||t("ownerUnavailable")};
+  }
   const state = ["Available", "Expired"].includes(job.state)
     ? "unassigned"
     : job.ownerStatus;
