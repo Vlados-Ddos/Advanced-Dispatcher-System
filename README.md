@@ -2,7 +2,7 @@
 
 ### Description
 
-Advanced Dispatcher System is a web dispatch console for Derail Valley. It reads the current railway state and presents topology, rolling stock, signals, turnouts, blocks, routes, orders and players on one map with an object inspector. It is intended for route planning, conflict and reservation checks, traffic monitoring and supported infrastructure commands from a browser. It does not create a second railway topology or replace the game’s native signalling systems.
+Advanced Dispatcher System is a web dispatch console for Derail Valley. It reads the current railway state and presents topology, rolling stock, signals, turnouts, blocks, routes, orders and players on one map with an object inspector. It is intended for route planning, conflict and reservation checks, traffic monitoring and supported infrastructure commands from a browser.
 
 ### Installation instructions
 
@@ -202,7 +202,7 @@ Search normalizes Russian and English text, case and spaces, and uses IDs, names
 
 ### Описание
 
-Advanced Dispatcher System — web-диспетчерская для Derail Valley. Она получает текущее состояние железнодорожной сети и показывает топологию, подвижной состав, сигналы, стрелки, блоки, маршруты, заказы и игроков на общей карте и в инспекторе. Мод предназначен для планирования маршрутов, проверки конфликтов и резерваций, наблюдения за движением и поддерживаемых команд инфраструктуре из браузера. Он не создаёт вторую топологию и не заменяет штатную сигнализацию игры.
+Advanced Dispatcher System — web-диспетчерская для Derail Valley. Она получает текущее состояние железнодорожной сети и показывает топологию, подвижной состав, сигналы, стрелки, блоки, маршруты, заказы и игроков на общей карте и в инспекторе. Мод предназначен для планирования маршрутов, проверки конфликтов и резерваций, наблюдения за движением и поддерживаемых команд инфраструктуре из браузера.
 
 ### Установка
 
